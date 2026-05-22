@@ -21,7 +21,6 @@ from pydantic import BaseModel, Field
 
 from ..app import App
 from ..events import (
-    CallsignHeard,
     QSOLogged,
     QSOStarted,
     QSOUpdated,
@@ -382,6 +381,10 @@ class MCPTools:
                 "wrong_state",
                 f"call_cq requires CALLING_CQ but state is {self.app.fsm.state}",
             )
+        # Each CQ attempt opens a fresh listening window — any leftover
+        # callsigns from a prior RECEIVING_REPLY that was abandoned without
+        # select_caller would otherwise re-appear in this attempt's pileup.
+        self.app.fsm.session.pileup.clear()
         slice_id = self.app.fsm.session.current_slice_id
         token = await self.app.interlock.request_tx(
             summary=f"Transmit CQ call (template={template_id or 'default'})",
@@ -401,8 +404,8 @@ class MCPTools:
                 replies_heard=0,
                 last_state=str(self.app.fsm.state),
             )
-        # Narrate the planned TX to the dashboard transcript. Real Piper → DAX
-        # TX lands in Phase 9. No PTT key without audio.
+        # Speak the CQ via Piper → DAX when the pipeline can TX; falls back
+        # to narration-only (transcript event, no PTT) when audio is offline.
         cq_text = render_cq_template(
             "CQ CQ CQ, this is {callsign_phonetic}, {callsign_phonetic}, calling CQ and standing by.",
             callsign=self.app.settings.operator.callsign,
@@ -417,29 +420,58 @@ class MCPTools:
             last_state=str(self.app.fsm.state),
         )
 
-    async def listen_for_reply(self, timeout_s: float = 7.0) -> list[HeardCallsignDTO]:
-        """Phase-3 stub: returns the pileup that the caller (test) has populated.
+    async def listen_for_reply(
+        self,
+        timeout_s: float = 7.0,
+        settle_window_s: float = 1.5,
+    ) -> list[HeardCallsignDTO]:
+        """Wait up to ``timeout_s`` for callers to appear in the pileup.
 
-        Phase 8 wires the STT-driven callsign extractor.
+        After the first callsign lands, keep listening for an additional
+        ``settle_window_s`` so a pileup of stations calling simultaneously
+        is captured together. Returns the current pileup (possibly empty)
+        and dispatches REPLY_HEARD or REPLY_TIMEOUT accordingly.
+
+        The pileup itself is populated asynchronously by ``App`` subscribing
+        to ``transcript.callsign`` events from the live STT path
+        (``stt/transcriber.py``). When the pipeline is disabled (mock mode,
+        no DAX device, etc.) the pileup stays empty and the call times out
+        — except when callers were pre-populated (test injection, or a fast
+        caller that landed between ``call_cq`` returning and this tool
+        being awaited), in which case we return immediately.
         """
         if self.app.fsm.state is not State.RECEIVING_REPLY:
             raise ToolError(
                 "wrong_state",
                 f"listen_for_reply requires RECEIVING_REPLY but state is {self.app.fsm.state}",
             )
-        pileup = self.app.fsm.session.pileup
-        if pileup:
-            for h in pileup:
-                await self.app.bus.publish(
-                    CallsignHeard(callsign=h.callsign, confidence=h.confidence, snr_dbm=h.snr_dbm)
-                )
-            await self.app.fsm.dispatch(Event.REPLY_HEARD, reason=f"{len(pileup)}_callers")
-            return [
-                HeardCallsignDTO(callsign=h.callsign, confidence=h.confidence, snr_dbm=h.snr_dbm)
-                for h in pileup
-            ]
-        await self.app.fsm.dispatch(Event.REPLY_TIMEOUT, reason="no_reply")
-        return []
+
+        sess = self.app.fsm.session
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+
+        if not sess.pileup:
+            poll = 0.1
+            while not sess.pileup:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    await self.app.fsm.dispatch(Event.REPLY_TIMEOUT, reason="no_reply")
+                    return []
+                await asyncio.sleep(min(poll, remaining))
+            settle = min(settle_window_s, max(0.0, deadline - loop.time()))
+            if settle > 0:
+                await asyncio.sleep(settle)
+
+        pileup_snapshot = list(sess.pileup)
+        await self.app.fsm.dispatch(
+            Event.REPLY_HEARD, reason=f"{len(pileup_snapshot)}_callers"
+        )
+        return [
+            HeardCallsignDTO(
+                callsign=h.callsign, confidence=h.confidence, snr_dbm=h.snr_dbm
+            )
+            for h in pileup_snapshot
+        ]
 
     async def select_caller(self, callsign: str) -> SessionStateDTO:
         if self.app.fsm.state is not State.HANDLING_PILEUP:

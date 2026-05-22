@@ -47,11 +47,11 @@ def build_mcp(app: App) -> FastMCP:
     async def get_session_state() -> SessionStateDTO:
         return await tools.get_session_state()
 
-    @mcp.tool(description="List recent QSOs (Phase-10 wires the SQLite store).")
+    @mcp.tool(description="List recent QSOs from the SQLite store, newest first.")
     async def get_recent_qsos(limit: int = 20) -> list[QSOContextDTO]:
         return await tools.get_recent_qsos(limit=limit)
 
-    @mcp.tool(description="Export QSOs as ADIF text (Phase-10 wires the full exporter).")
+    @mcp.tool(description="Export logged QSOs as ADIF 3.1.0 text.")
     async def export_adif(start: str | None = None, end: str | None = None) -> str:
         return await tools.export_adif(start=start, end=end)
 
@@ -102,8 +102,9 @@ def build_mcp(app: App) -> FastMCP:
     @mcp.tool(
         description=(
             "Run the three-attempt courtesy check on ``freq_hz``. Gated by the safety "
-            "interlock and band-plan privileges. In Phase 3 the TX side is stubbed; the "
-            "S-meter is consulted for clearance."
+            "interlock and band-plan privileges. TX speaks via Piper out the DAX device "
+            "when the audio pipeline is online and falls back to narration-only "
+            "(transcript event, no PTT) otherwise. The S-meter is consulted for clearance."
         )
     )
     async def check_frequency_in_use(
@@ -146,11 +147,20 @@ def build_mcp(app: App) -> FastMCP:
     # ---- WORKFLOW ---------------------------------------------------
 
     @mcp.tool(
-        description="Listen for callers and return any callsigns heard. In Phase 3 this returns whatever the pileup is."
+        description=(
+            "Listen for callers up to ``timeout_s`` seconds and return callsigns heard. "
+            "Pileup is populated by the live STT path (Whisper -> callsign extractor). "
+            "After the first caller, an additional ``settle_window_s`` is allowed so "
+            "simultaneous callers are returned together."
+        )
     )
-    async def listen_for_reply(timeout_s: float = 7.0) -> list[HeardCallsignDTO] | dict[str, Any]:
+    async def listen_for_reply(
+        timeout_s: float = 7.0, settle_window_s: float = 1.5
+    ) -> list[HeardCallsignDTO] | dict[str, Any]:
         try:
-            return await tools.listen_for_reply(timeout_s=timeout_s)
+            return await tools.listen_for_reply(
+                timeout_s=timeout_s, settle_window_s=settle_window_s
+            )
         except ToolError as e:
             return _wrap_errors(e)
 
