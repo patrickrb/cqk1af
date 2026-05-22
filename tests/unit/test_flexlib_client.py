@@ -47,12 +47,16 @@ class _RecordingStream:
         self.TXStreamID = 0xDEADBEEF
         self.Transmit = False
         self.calls: list[tuple[np.ndarray, bool]] = []
+        self.request_tx_calls: list[bool] = []
         self.closed = False
 
     def AddTXData(self, samples: Any, sendReducedBW: bool) -> None:
         # Capture a copy so callers can mutate their buffers without affecting us.
         arr = np.array(samples, dtype=np.float32, copy=True)
         self.calls.append((arr, sendReducedBW))
+
+    def RequestTX(self, on: bool) -> None:
+        self.request_tx_calls.append(on)
 
     def Close(self) -> None:
         self.closed = True

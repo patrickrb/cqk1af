@@ -91,6 +91,9 @@ class FlexLibRadioClient(RadioClient):
         self._tx_stream_ready = threading.Event()
         # Cached numpy for the resample / float-conversion hot path.
         self._np: Any = None
+        # Lazy cache of the signal-level Meter for each slice. Resolved on the
+        # first read_s_meter call.
+        self._s_meter_cache: dict[int, Any] = {}
         # RX audio stream state.
         self._rx_stream: Any = None
         self._rx_stream_ready = threading.Event()
@@ -365,12 +368,98 @@ class FlexLibRadioClient(RadioClient):
         await self._publish_slice(s)
         return s
 
+    # Slice has no .SMeter property in v4 FlexLib — signal level is exposed as
+    # a Meter object reachable via FindMeterByName / FindMeterByIndex on the
+    # slice. We cache the resolved Meter per slice so we only do the lookup
+    # once.
+    _S_METER_CANDIDATE_NAMES: tuple[str, ...] = (
+        "SIG", "SLI", "SLEVEL", "S_LEVEL", "S", "RXLEVEL",
+    )
+
+    def _resolve_slice_s_meter(self, slice_obj: Any) -> Any | None:
+        """Find the slice's signal-level Meter. Returns the Meter or None.
+
+        Strategy:
+          1. Enumerate every reachable Meter via FindMeterByIndex(0..63) and log
+             it once so we know what's available on the operator's radio.
+          2. Score candidates: exact-name match wins; otherwise prefer dBm-units
+             meters whose Name contains 'S' or 'SIG' and is NOT a bandwidth
+             indicator like '24KHZ'.
+        """
+        # Pass 1: enumerate and log every meter so we have ground truth.
+        all_meters: list[tuple[int, str, str, str]] = []
+        for i in range(0, 64):
+            try:
+                m = slice_obj.FindMeterByIndex(i)
+            except Exception:
+                m = None
+            if m is None:
+                continue
+            try:
+                nm = str(m.Name or "")
+                desc = str(m.Description or "")
+                units = str(m.Units or "")
+            except Exception:
+                continue
+            all_meters.append((i, nm, desc, units))
+            log.info(
+                "flexlib.meter_seen", index=i, name=nm, desc=desc[:80], units=units
+            )
+
+        # Pass 2: exact-name match against the candidate list.
+        for name in self._S_METER_CANDIDATE_NAMES:
+            try:
+                m = slice_obj.FindMeterByName(name)
+            except Exception:
+                m = None
+            if m is not None:
+                log.info("flexlib.s_meter_resolved", method="name", name=name)
+                return m
+
+        # Pass 3: scored fallback. Skip bandwidth-style meters (digits in name)
+        # which is what bit us before ("24KHZ" matched the old loose heuristic).
+        def looks_like_bandwidth(name_upper: str) -> bool:
+            return any(c.isdigit() for c in name_upper) or "KHZ" in name_upper or "HZ" in name_upper
+
+        for i, nm, desc, units in all_meters:
+            up_nm = nm.upper()
+            up_desc = desc.upper()
+            up_units = units.upper()
+            if looks_like_bandwidth(up_nm):
+                continue
+            if up_units != "DBM":
+                continue
+            # Accept names that look like an S-meter / signal-level indicator.
+            if up_nm in {"SIG", "SLI", "S", "SMETER", "S-METER", "RXLEVEL", "SIGLEVEL"}:
+                log.info("flexlib.s_meter_resolved", method="scored", index=i, name=nm)
+                return slice_obj.FindMeterByIndex(i)
+
+        log.warning(
+            "flexlib.s_meter_not_found",
+            meters_seen=[f"{i}:{n}({u})" for i, n, _, u in all_meters][:20],
+        )
+        return None
+
     async def read_s_meter(self, slice_id: int) -> float:
         r = self._require_radio()
         loop = asyncio.get_running_loop()
 
         def _do() -> float:
-            return float(r.SliceList[slice_id].SMeter)
+            slice_obj = r.SliceList[slice_id]
+            meter = self._s_meter_cache.get(slice_id)
+            if meter is None:
+                meter = self._resolve_slice_s_meter(slice_obj)
+                if meter is not None:
+                    self._s_meter_cache[slice_id] = meter
+            if meter is None:
+                # Nothing reachable — return a very weak reading so the
+                # courtesy check treats the freq as clear rather than busy.
+                return -120.0
+            try:
+                return float(meter.Peak)
+            except Exception:
+                log.exception("flexlib.s_meter_read_failed")
+                return -120.0
 
         dbm = await loop.run_in_executor(None, _do)
         self._state.slices[slice_id].s_meter_dbm = dbm
@@ -416,9 +505,26 @@ class FlexLibRadioClient(RadioClient):
         Converts to 24 kHz mono float32 → stereo-interleaved (L=R=mono) →
         chunks of 128 stereo frames (256 floats) → one ``AddTXData`` call
         per chunk, paced so we don't outrun the radio's UDP buffer.
+
+        Re-asserts ``RequestTX(True)`` on every call as a defensive measure:
+        the radio drops audio packets from streams that aren't the active TX,
+        and observed symptom (PTT keys, no on-air audio) matches exactly that
+        state being lost between connect and the first TX.
         """
         if self._tx_stream is None:
             raise RuntimeError("DAX TX stream not open; FlexLib client not fully connected")
+        loop_for_claim = asyncio.get_running_loop()
+
+        def _claim_tx() -> None:
+            try:
+                # No-op if already claimed; cheap to re-send.
+                self._tx_stream.Transmit = True
+                self._tx_stream.RequestTX(True)
+            except Exception:
+                log.exception("flexlib.request_tx_failed")
+
+        await loop_for_claim.run_in_executor(None, _claim_tx)
+        log.info("flexlib.tx_claim_reasserted", stream_id=self._state.tx_stream_id)
         np = self._np
         if np is None:
             import numpy as np  # type: ignore[import-not-found]

@@ -37,23 +37,27 @@ export function TxApprovalPrompt() {
     });
   }
 
-  // Auto-deny on expiry — single-fire setTimeout per request.
+  // Auto-deny on expiry — single-fire setTimeout per request. Uses the local
+  // deadline computed at add-time so wall-clock skew between server and
+  // browser can't auto-deny on first render.
   useEffect(() => {
     if (!top) return;
-    const expiry = new Date(top.expires_at).getTime();
-    const ms = expiry - Date.now();
+    const deadline = top.local_deadline_ms ?? new Date(top.expires_at).getTime();
+    const ms = deadline - Date.now();
     if (ms <= 0) {
+      console.warn("[approval] auto-deny on render", { req_id: top.req_id, ms, expires_at: top.expires_at, local_deadline_ms: top.local_deadline_ms });
       decide(top.req_id, false);
       return;
     }
     const t = setTimeout(() => decide(top.req_id, false), ms);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [top?.req_id, top?.expires_at]);
+  }, [top?.req_id, top?.local_deadline_ms]);
 
   if (!top) return null;
 
-  const remainingS = Math.max(0, Math.ceil((new Date(top.expires_at).getTime() - now) / 1000));
+  const deadline = top.local_deadline_ms ?? new Date(top.expires_at).getTime();
+  const remainingS = Math.max(0, Math.ceil((deadline - now) / 1000));
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60">
