@@ -134,6 +134,9 @@ class App:
             self.pipeline.status.notes.append(
                 "Mock radio mode — audio pipeline skipped; TX is narrated to the transcript."
             )
+            # Re-publish so the dashboard sees the mock-mode reason rather than
+            # the generic "disabled" stamped at start().
+            await self.pipeline._publish_status()
 
     async def shutdown(self) -> None:
         try:

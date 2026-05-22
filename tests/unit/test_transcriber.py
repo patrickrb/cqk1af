@@ -61,6 +61,76 @@ async def test_confidence_derivation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hallucination_dropped_before_publish() -> None:
+    bus = EventBus()
+    seen: list = []
+    async def collect(ev):
+        seen.append(ev)
+    await bus.subscribe("transcript.final", collect, name="t")
+
+    # Classic Whisper-on-silence hallucination.
+    engine = MockSTTEngine(
+        lambda _pcm, _sr: TranscriptionResult(
+            text="Thanks for watching!", avg_logprob=-0.4, no_speech_prob=0.8
+        )
+    )
+    tr = Transcriber(bus, engine)
+    utt = Utterance(pcm=b"\x00" * 1600, sample_rate=16000, started_ts="", ended_ts="", frame_count=5)
+    out = await tr.transcribe_utterance(utt)
+    assert out is None  # filtered, not published
+    await asyncio.sleep(0.02)
+    assert seen == []
+    await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_hallucination_filter_can_be_disabled() -> None:
+    bus = EventBus()
+    seen: list = []
+    async def collect(ev):
+        seen.append(ev)
+    await bus.subscribe("transcript.final", collect, name="t")
+
+    engine = MockSTTEngine(
+        lambda _pcm, _sr: TranscriptionResult(
+            text="Thanks for watching!", avg_logprob=-0.4, no_speech_prob=0.8
+        )
+    )
+    tr = Transcriber(bus, engine, cfg=TranscriberConfig(drop_hallucinations=False))
+    utt = Utterance(pcm=b"\x00" * 1600, sample_rate=16000, started_ts="", ended_ts="", frame_count=5)
+    out = await tr.transcribe_utterance(utt)
+    assert out is not None
+    await asyncio.sleep(0.02)
+    assert len(seen) == 1
+    await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_stage_hint_passed_to_prompt_builder() -> None:
+    from cqk1af.stt.prompt_builder import PromptBuilder
+
+    bus = EventBus()
+    seen_prompt: dict[str, str] = {}
+
+    def fake_engine(_pcm: bytes, _sr: int) -> TranscriptionResult:
+        return TranscriptionResult(text="hello", avg_logprob=-0.2, no_speech_prob=0.05)
+
+    engine = MockSTTEngine(fake_engine)
+
+    class CapturingPromptBuilder(PromptBuilder):
+        def build(self, *, extra="", own_callsign=None, stage=None):
+            seen_prompt["stage"] = stage or ""
+            return super().build(extra=extra, own_callsign=own_callsign, stage=stage)
+
+    tr = Transcriber(bus, engine, CapturingPromptBuilder())
+    tr.set_stage("calling_cq")
+    utt = Utterance(pcm=b"\x00" * 320, sample_rate=16000, started_ts="", ended_ts="", frame_count=1)
+    await tr.transcribe_utterance(utt)
+    assert seen_prompt["stage"] == "calling_cq"
+    await bus.close()
+
+
+@pytest.mark.asyncio
 async def test_submit_runs_in_background() -> None:
     bus = EventBus()
     seen: list = []

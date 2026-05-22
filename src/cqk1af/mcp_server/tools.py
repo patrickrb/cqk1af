@@ -94,6 +94,14 @@ class AudioStatusDTO(BaseModel):
     can_rx: bool
     can_tx: bool
     notes: list[str]
+    frames_seen: int = 0
+    voice_frames: int = 0
+    voice_utterances: int = 0
+    stt_attempts: int = 0
+    stt_results: int = 0
+    stt_dropped: int = 0
+    last_stt_error: str = ""
+    rx_rms_dbfs: float = -120.0
 
 
 class SessionStateDTO(BaseModel):

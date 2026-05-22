@@ -31,6 +31,18 @@ audio = [
 stt = [
     "faster-whisper>=1.0",
 ]
+cuda = [
+    # NVIDIA CUDA runtime DLLs that CTranslate2 (under faster-whisper) needs
+    # for GPU inference on Windows. Without these on the DLL search path,
+    # the encoder fails with "Library cublas64_12.dll is not found or cannot
+    # be loaded" even on hosts with a working CUDA toolkit. WhisperSTTEngine
+    # registers the pip-shipped DLL dirs via ``os.add_dll_directory`` + PATH
+    # before importing ctranslate2. Skip if you don't have an NVIDIA GPU.
+    "nvidia-cublas-cu12; sys_platform == 'win32'",
+    "nvidia-cudnn-cu12; sys_platform == 'win32'",
+    "nvidia-cuda-runtime-cu12; sys_platform == 'win32'",
+    "nvidia-cuda-nvrtc-cu12; sys_platform == 'win32'",
+]
 radio = [
     "pythonnet>=3.0; sys_platform == 'win32'",
 ]

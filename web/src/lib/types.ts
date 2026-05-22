@@ -49,6 +49,14 @@ export interface AudioStatus {
   can_rx: boolean;
   can_tx: boolean;
   notes: string[];
+  frames_seen?: number;
+  voice_frames?: number;
+  voice_utterances?: number;
+  stt_attempts?: number;
+  stt_results?: number;
+  stt_dropped?: number;
+  last_stt_error?: string;
+  rx_rms_dbfs?: number;
 }
 
 export interface SessionState {
@@ -106,6 +114,8 @@ export type WSMessage =
   | { type: "radio_slice"; payload: Partial<SliceInfo> & { connected?: boolean; model?: string; ptt_on?: boolean } }
   | { type: "s_meter"; payload: { slice_id: number; dbm: number } }
   | { type: "transcript"; payload: { text: string; confidence: number; direction?: "tx" | "rx"; ts: string } }
+  | { type: "audio_status"; payload: AudioStatus }
+  | { type: "rx_voice"; payload: { active: boolean; channel: string; duration_ms?: number } }
   | { type: "callsigns_heard"; payload: { entries: HeardCallsign[] } }
   | { type: "tx_approval_requested"; payload: { req_id: string; summary: string; payload: Record<string, unknown>; expires_at: string } }
   | { type: "qso_started"; payload: { qso_id: string; callsign: string; freq_hz: number; mode: string } }

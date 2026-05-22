@@ -27,6 +27,10 @@ class VadConfig:
     aggressiveness: int = 3  # 0..3 (3 = most aggressive)
     hangover_ms: int = 300  # bridge brief gaps inside speech
     preroll_ms: int = 200  # buffer N ms BEFORE speech start for STT context
+    # Hard cap on a single utterance. When VAD never observes silence (e.g.
+    # continuous band noise on SSB falsely flagged as speech), we still emit
+    # an utterance every N seconds so STT keeps making progress.
+    max_utterance_ms: int = 8000
 
 
 @dataclass
@@ -53,6 +57,10 @@ class VoiceActivityDetector:
         self._utt_started_ts = ""
         self._utt_frames = 0
         self._vad = None  # lazy: webrtcvad is optional
+        # Per-frame VAD verdict counter. The capture loop reads this so the
+        # dashboard can show "frames=2400, voice=0" when webrtcvad is too
+        # strict for the audio (e.g. aggressiveness=3 on SSB).
+        self.voice_frame_count: int = 0
 
     def _ensure_vad(self) -> None:
         if self._vad is None:
@@ -72,6 +80,8 @@ class VoiceActivityDetector:
                 f"expected {self._frame_bytes}-byte frame, got {len(frame)}"
             )
         speech = self._is_speech(frame)
+        if speech:
+            self.voice_frame_count += 1
 
         if not self._is_speaking:
             # Maintain pre-roll buffer
@@ -92,15 +102,33 @@ class VoiceActivityDetector:
         # Already speaking
         self._utt.extend(frame)
         self._utt_frames += 1
+        utt_duration_ms = self._utt_frames * self.cfg.frame_ms
         if speech:
             self._silent_run_ms = 0
+            # Even with no silent break, force-flush at the max-utterance cap
+            # so STT still gets a chance. Keep the speaking state True and
+            # start a fresh buffer immediately — this handles the case where
+            # band noise is continuously classified as speech.
+            if utt_duration_ms >= self.cfg.max_utterance_ms:
+                return await self._cut_utterance(keep_speaking=True)
             return None
         # Silent frame
         self._silent_run_ms += self.cfg.frame_ms
-        if self._silent_run_ms < self.cfg.hangover_ms:
+        if (
+            self._silent_run_ms < self.cfg.hangover_ms
+            and utt_duration_ms < self.cfg.max_utterance_ms
+        ):
             return None
-        # Hangover expired — utterance ends
-        self._is_speaking = False
+        # Hangover expired (or max duration reached) — utterance ends
+        return await self._cut_utterance(keep_speaking=False)
+
+    async def _cut_utterance(self, *, keep_speaking: bool) -> Utterance:
+        """Snapshot the current buffer as an Utterance and reset.
+
+        If ``keep_speaking`` is True, we stay in the speaking state with a
+        fresh empty buffer — used to chunk a continuous "speaking" run into
+        max_utterance_ms windows so STT keeps making progress.
+        """
         utt = Utterance(
             pcm=bytes(self._utt),
             sample_rate=self.cfg.sample_rate,
@@ -109,9 +137,20 @@ class VoiceActivityDetector:
             frame_count=self._utt_frames,
         )
         duration_ms = int(self._utt_frames * self.cfg.frame_ms)
-        await self.bus.publish(VoiceActivityStopped(channel=self.channel, duration_ms=duration_ms))
+        # A max_duration cut isn't really the end of speech, but downstream
+        # subscribers (transcriber, dashboard) treat it the same — utterance
+        # ready to transcribe.
+        await self.bus.publish(
+            VoiceActivityStopped(channel=self.channel, duration_ms=duration_ms)
+        )
         self._utt.clear()
-        self._preroll.clear()
+        if not keep_speaking:
+            self._is_speaking = False
+            self._preroll.clear()
+        else:
+            # Continuous "speaking" — start the next buffer fresh.
+            self._utt_started_ts = utcnow().isoformat()
+            self._utt_frames = 0
         self._silent_run_ms = 0
         return utt
 

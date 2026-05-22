@@ -80,6 +80,30 @@ class VoiceActivityStopped(Event):
     duration_ms: int = 0
 
 
+class AudioPipelineStatus(Event):
+    """Snapshot of the audio pipeline's capability flags.
+
+    Published after pipeline start, and again whenever a leg flips (e.g. STT
+    engine first loads, RX capture recovers). The dashboard mirrors this into
+    its session store so the RX/STT indicator reflects reality.
+    """
+
+    topic: ClassVar[str] = "audio.status"
+    status: dict[str, Any] = Field(default_factory=dict)
+
+
+class TranscriptDropped(Event):
+    """STT produced text but a downstream filter dropped it (hallucination,
+    empty, too short). Surfaced so the operator can see *why* the transcript
+    feed is empty despite voice activity.
+    """
+
+    topic: ClassVar[str] = "transcript.dropped"
+    reason: str = ""
+    text: str = ""
+    no_speech_prob: float = 0.0
+
+
 # --- STT -----------------------------------------------------------------
 
 
