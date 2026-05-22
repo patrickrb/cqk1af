@@ -5,7 +5,11 @@ feed ``Utterance`` objects to ``transcribe_utterance``, which runs STT in a
 background task and publishes ``TranscriptFinal`` (and downstream
 ``CallsignHeard``) events on the bus.
 
-Phase 7 wires the basic transcript path. Phase 8 wires the callsign extractor.
+When ``TranscriberConfig.extract_callsigns`` is true (the default) every
+transcript is passed through ``nlp.callsign_extractor`` and each candidate
+above ``min_callsign_confidence`` is emitted as a ``CallsignHeard`` event;
+``app.py`` subscribes to those and appends them to ``session.pileup`` when
+the FSM is in a state where callers are expected.
 """
 from __future__ import annotations
 
