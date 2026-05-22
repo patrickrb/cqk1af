@@ -58,6 +58,12 @@ DAX_TX_SAMPLE_RATE = 24000
 DAX_TX_SAMPLES_PER_PACKET = 128  # one stereo frame per AddTXData call
 DAX_TX_STEREO_FLOATS_PER_PACKET = DAX_TX_SAMPLES_PER_PACKET * 2  # 256
 
+# DAX RX wire format. FlexLib's DAXRXAudioStream.DataReady delivers stereo-
+# interleaved float[] (L,R,L,R,...) at 24 kHz. We take the L channel as mono.
+DAX_RX_SAMPLE_RATE = 24000
+DAX_RX_DEFAULT_CHANNEL = 1
+DAX_RX_GAIN = 50  # matches smartsdr-mcp/AudioPipeline.cs
+
 
 class FlexLibRadioClient(RadioClient):
     """Real FlexRadio control via FlexLib.dll, including DAX TX audio."""
@@ -85,6 +91,23 @@ class FlexLibRadioClient(RadioClient):
         self._tx_stream_ready = threading.Event()
         # Cached numpy for the resample / float-conversion hot path.
         self._np: Any = None
+        # RX audio stream state.
+        self._rx_stream: Any = None
+        self._rx_stream_ready = threading.Event()
+        self._rx_channel: int | None = None
+        # Handler is called from FlexLib's UDP receive thread on every DataReady
+        # event. Callers register via ``set_rx_audio_handler``; AudioPipeline
+        # wraps it to marshal frames onto the asyncio loop.
+        self._rx_audio_handler = None  # type: ignore[assignment]
+        # Diagnostic counter — used to log the first DataReady so we can tell
+        # from the dashboard whether the FlexLib event reached us at all.
+        self._rx_data_ready_count = 0
+        # Strong reference to the bound method we register with FlexLib's
+        # ``DataReady`` event. Without holding this ourselves, pythonnet 3.0.x
+        # has been seen to let the .NET delegate's Python target get GC'd,
+        # silently breaking the callback. See:
+        # https://github.com/pythonnet/pythonnet/issues/2071
+        self._rx_data_ready_delegate = None  # type: ignore[assignment]
 
     def bind_interlock(self, interlock) -> None:  # type: ignore[no-untyped-def]
         self._interlock = interlock
@@ -96,6 +119,13 @@ class FlexLibRadioClient(RadioClient):
     @property
     def supports_native_tx_audio(self) -> bool:
         return self._tx_stream is not None
+
+    @property
+    def supports_native_rx_audio(self) -> bool:
+        # True once the radio is connected and pythonnet is loaded — we can
+        # bring the stream up on demand. Don't require the stream to already
+        # be open; AudioPipeline calls ``start_rx_audio`` to open it.
+        return self._radio is not None
 
     # ---- lifecycle --------------------------------------------------
 
@@ -119,6 +149,14 @@ class FlexLibRadioClient(RadioClient):
                 return
             try:
                 self.force_ptt_off()
+                # Tear down RX stream so the radio frees the daxrx slot.
+                if self._rx_stream is not None:
+                    try:
+                        self._rx_stream.Close()
+                    except Exception:
+                        log.exception("flexlib.rx_stream_close_failed")
+                    self._rx_stream = None
+                    self._rx_channel = None
                 # Tear down the TX stream before disconnecting so the radio
                 # frees the stream id and doesn't leak a daxtx slot.
                 if self._tx_stream is not None:
@@ -175,10 +213,16 @@ class FlexLibRadioClient(RadioClient):
         # session; multiple non-GUI clients can coexist on one radio.
         if not getattr(API, "ProgramName", None):
             API.ProgramName = "cqk1af"
-        # IsGUI=True registers our app as a GUI client so it can own a DAX TX
-        # stream. With IsGUI=False the stream gets reassigned and our packets
-        # are silently dropped.
-        API.IsGUI = True
+        # IsGUI=False matches smartsdr-mcp's working RX setup. An earlier
+        # comment here said IsGUI=True was required for DAX TX ("stream gets
+        # reassigned with IsGUI=False"); with the current FlexLib + SmartSDR
+        # v3.x that's no longer observed, and IsGUI=True silently breaks RX:
+        # DAX RX delivers zero-amplitude packets because the radio considers
+        # our app to be its own audio sink instead of a side-consumer.
+        # If TX regresses with IsGUI=False, fall back to a sidecar process
+        # for the RX side instead of flipping this back — that would lose
+        # RX again.
+        API.IsGUI = False
         API.Init()
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
@@ -445,6 +489,147 @@ class FlexLibRadioClient(RadioClient):
         marshal numpy float32 ndarray → System.Single[] directly.
         """
         self._tx_stream.AddTXData(chunk.tolist(), True)
+
+    # ---- RX audio --------------------------------------------------
+
+    def set_rx_audio_handler(self, handler) -> None:  # type: ignore[no-untyped-def]
+        self._rx_audio_handler = handler
+
+    async def start_rx_audio(self, *, channel: int = DAX_RX_DEFAULT_CHANNEL) -> None:
+        """Open the DAX RX audio stream on the given channel.
+
+        Idempotent: if a stream is already open on the requested channel,
+        returns immediately. Switching channels requires ``stop_rx_audio``
+        first (the FlexLib API doesn't expose a channel-change on an open
+        stream — same constraint as smartsdr-mcp).
+        """
+        if self._radio is None:
+            raise RuntimeError("Radio not connected; can't open DAX RX stream")
+        if self._rx_stream is not None:
+            if self._rx_channel == channel:
+                return
+            raise RuntimeError(
+                f"DAX RX stream already open on channel {self._rx_channel}; "
+                f"call stop_rx_audio() before switching to {channel}"
+            )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._open_dax_rx_stream_blocking, channel)
+
+    async def stop_rx_audio(self) -> None:
+        loop = asyncio.get_running_loop()
+
+        def _do() -> None:
+            if self._rx_stream is None:
+                return
+            try:
+                self._rx_stream.Close()
+            except Exception:
+                log.exception("flexlib.rx_stream_close_failed")
+            self._rx_stream = None
+            self._rx_channel = None
+
+        await loop.run_in_executor(None, _do)
+
+    def _open_dax_rx_stream_blocking(self, channel: int) -> None:
+        """Mirror of ``_open_dax_tx_stream_blocking`` for the RX direction.
+
+        FlexLib creates the RX stream asynchronously via the same event-driven
+        pattern. ``DAXRXAudioStreamAdded`` fires on the UDP worker thread with
+        the live ``DAXRXAudioStream``; we hook ``DataReady`` and forward to the
+        registered handler.
+        """
+        radio = self._radio
+        if radio is None:
+            raise RuntimeError("Radio not connected")
+        self._rx_stream_ready.clear()
+        self._rx_stream = None
+
+        # Build a plain-function closure (not a bound method) over the
+        # instance — empirically pythonnet 3.0.x silently fails to invoke
+        # bound methods as .NET event handlers in some scenarios (zero
+        # callbacks despite a successful ``DataReady +=`` registration).
+        # Closures over local variables marshal correctly. Hold a strong
+        # reference on self so the wrapper stays alive for the stream.
+        client_ref = self
+
+        def _data_ready_closure(stream_obj, rx_data) -> None:
+            client_ref._on_rx_data_ready(stream_obj, rx_data)
+
+        self._rx_data_ready_delegate = _data_ready_closure
+
+        def _on_stream_added(stream: Any) -> None:
+            # Runs on FlexLib's UDP worker thread.
+            self._rx_stream = stream
+            try:
+                stream.RXGain = DAX_RX_GAIN
+                stream.DataReady += self._rx_data_ready_delegate
+                log.info(
+                    "flexlib.rx_stream_data_ready_wired",
+                    stream_id=int(stream.StreamID),
+                    dax_channel=int(stream.DAXChannel),
+                )
+            except Exception:
+                log.exception("flexlib.rx_stream_init_failed")
+            self._rx_stream_ready.set()
+
+        radio.DAXRXAudioStreamAdded += _on_stream_added
+        try:
+            radio.RequestDAXRXAudioStream(channel)
+            if not self._rx_stream_ready.wait(timeout=5.0):
+                raise RuntimeError(
+                    "Timed out waiting for DAXRXAudioStreamAdded. Is the radio "
+                    "in a state where DAX RX can be opened?"
+                )
+        finally:
+            try:
+                radio.DAXRXAudioStreamAdded -= _on_stream_added
+            except Exception:
+                pass
+
+        if self._rx_stream is None:
+            raise RuntimeError("DAX RX stream creation reported success but stream is None")
+        self._rx_channel = channel
+        log.info("flexlib.rx_stream_ready", channel=channel)
+
+    def _on_rx_data_ready(self, _stream: Any, rx_data: Any) -> None:
+        """FlexLib DataReady callback. Fires on the UDP worker thread.
+
+        ``rx_data`` is a System.Single[] (stereo-interleaved L,R,L,R). We
+        take the L channel as mono and hand it to the registered handler.
+        Keep the body short — this thread is also what receives radio status
+        updates, so a slow handler stalls everything.
+        """
+        # Diagnostic: log only the first hit so we can confirm the event
+        # actually reaches Python at all. (Spamming the log on every packet
+        # would drown the rest at ~188 events/sec.)
+        self._rx_data_ready_count += 1
+        if self._rx_data_ready_count == 1:
+            log.info("flexlib.rx_data_ready_first", length=len(rx_data))
+
+        if self._rx_audio_handler is None:
+            return
+        np = self._np
+        if np is None:
+            try:
+                import numpy as np  # type: ignore[import-not-found]
+                self._np = np
+            except Exception:
+                return
+
+        try:
+            # System.Single[] → numpy float32. Going through ``list(rx_data)``
+            # is the only path that reliably marshals across pythonnet 3.0.x
+            # — ``np.fromiter`` over a CLR array is suspected of returning
+            # an empty result under certain GC patterns. The packet is small
+            # (256 floats / 1 kB) so the list copy is cheap.
+            arr = np.asarray(list(rx_data), dtype=np.float32)
+            if arr.size == 0:
+                return
+            # L channel (matches smartsdr-mcp/AudioPipeline.cs:170).
+            mono = arr[0::2]
+            self._rx_audio_handler(mono, DAX_RX_SAMPLE_RATE)
+        except Exception:
+            log.exception("flexlib.rx_data_handler_failed")
 
     # ---- internals -------------------------------------------------
 

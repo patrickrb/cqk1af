@@ -120,3 +120,31 @@ class RadioClient(ABC):
         stream wants. Caller has already keyed PTT.
         """
         raise NotImplementedError
+
+    # ---- native RX audio (FlexLib DAX) -----------------------------
+
+    # Same shape as the TX side, for the radio's RX path. When a backend
+    # supports this, AudioPipeline subscribes via ``set_rx_audio_handler``
+    # instead of opening DAX Audio RX 1 with sounddevice — that Windows audio
+    # device, when opened, makes SmartSDR drop PC Audio routing. FlexLib's
+    # DAXRXAudioStream is a separate UDP stream and doesn't touch routing.
+    @property
+    def supports_native_rx_audio(self) -> bool:
+        return False
+
+    async def start_rx_audio(self, *, channel: int = 1) -> None:
+        """Open the radio's DAX RX audio stream. No-op for backends without one."""
+        raise NotImplementedError
+
+    async def stop_rx_audio(self) -> None:
+        """Close the radio's DAX RX audio stream."""
+        raise NotImplementedError
+
+    def set_rx_audio_handler(self, handler) -> None:  # type: ignore[no-untyped-def]
+        """Register a callable that receives RX audio samples as they arrive.
+
+        Handler signature: ``handler(samples: numpy.ndarray, sample_rate: int)``
+        where ``samples`` is mono float32 in [-1, 1]. Called from the backend's
+        audio thread; the implementation marshals to the event loop as needed.
+        """
+        raise NotImplementedError

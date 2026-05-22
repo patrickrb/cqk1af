@@ -15,6 +15,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from ..app import App
 from ..events import (
+    AudioPipelineStatus,
     CallsignHeard,
     Event,
     KillSwitchTriggered,
@@ -30,6 +31,8 @@ from ..events import (
     StateChanged,
     TranscriptFinal,
     TxApprovalRequested,
+    VoiceActivityStarted,
+    VoiceActivityStopped,
 )
 from ..mcp_server.tools import MCPTools
 from ..util.logging import get_logger
@@ -67,6 +70,13 @@ class WSHub:
         self._subs.append(await b.subscribe("radio.ptt", self._on_ptt, name="ws.ptt"))
         self._subs.append(await b.subscribe("transcript.final", self._on_transcript_final, name="ws.tr"))
         self._subs.append(await b.subscribe("transcript.callsign", self._on_callsign, name="ws.call"))
+        self._subs.append(await b.subscribe("audio.status", self._on_audio_status, name="ws.audio"))
+        self._subs.append(
+            await b.subscribe("audio.voice_started", self._on_voice_started, name="ws.voice_started")
+        )
+        self._subs.append(
+            await b.subscribe("audio.voice_stopped", self._on_voice_stopped, name="ws.voice_stopped")
+        )
         self._subs.append(
             await b.subscribe("control.tx_approval_requested", self._on_tx_approval, name="ws.approve")
         )
@@ -319,6 +329,29 @@ class WSHub:
             {
                 "type": "qso_logged",
                 "payload": {"qso_id": str(ev.qso_id), "cloudlog_id": ev.cloudlog_id},
+            }
+        )
+
+    async def _on_audio_status(self, ev: Event) -> None:
+        assert isinstance(ev, AudioPipelineStatus)
+        await self._broadcast({"type": "audio_status", "payload": ev.status})
+
+    async def _on_voice_started(self, ev: Event) -> None:
+        assert isinstance(ev, VoiceActivityStarted)
+        await self._broadcast(
+            {"type": "rx_voice", "payload": {"active": True, "channel": ev.channel}}
+        )
+
+    async def _on_voice_stopped(self, ev: Event) -> None:
+        assert isinstance(ev, VoiceActivityStopped)
+        await self._broadcast(
+            {
+                "type": "rx_voice",
+                "payload": {
+                    "active": False,
+                    "channel": ev.channel,
+                    "duration_ms": ev.duration_ms,
+                },
             }
         )
 

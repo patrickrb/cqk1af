@@ -120,6 +120,16 @@ function dispatch(msg: WSMessage) {
         direction: msg.payload.direction ?? "rx",
       });
       break;
+    case "audio_status":
+      useSession.getState().setAudioStatus(msg.payload);
+      break;
+    case "rx_voice":
+      // Only "rx" channel reflects on the RX-STT indicator; ignore tx-side
+      // hints if anyone publishes them later.
+      if (msg.payload.channel === "rx") {
+        useSession.getState().setRxVoiceActive(msg.payload.active);
+      }
+      break;
     case "callsigns_heard":
       useTranscripts.getState().appendPileup(msg.payload.entries);
       break;

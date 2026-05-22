@@ -37,3 +37,45 @@ def test_prompt_bounded() -> None:
         p.remember_callsign(f"K1A{i:03d}")
     out = p.build(extra="extra notes " * 200)
     assert len(out) <= 800
+
+
+def test_operator_context_included() -> None:
+    p = PromptBuilder(base_vocab="vocab")
+    p.set_operator(callsign="K1AF", name="Burns", qth="Boston, MA", grid="FN42")
+    out = p.build()
+    assert "K1AF" in out
+    assert "Burns" in out
+    assert "Boston" in out
+    assert "FN42" in out
+
+
+def test_stage_calling_cq_hint() -> None:
+    p = PromptBuilder(base_vocab="vocab")
+    out = p.build(stage="calling_cq")
+    assert "CQ" in out or "reply" in out.lower()
+
+
+def test_stage_in_qso_includes_own_call() -> None:
+    p = PromptBuilder(base_vocab="vocab")
+    p.set_operator(callsign="K1AF")
+    out = p.build(stage="in_qso")
+    assert "QSO" in out
+    # Own callsign should be referenced in the stage hint, not only the operator block.
+    assert out.count("K1AF") >= 2
+
+
+def test_recent_callsigns_at_tail() -> None:
+    # Whisper effectively uses the last ~224 tokens; recent context should land last.
+    p = PromptBuilder(base_vocab="vocab")
+    p.remember_callsign("W1AW")
+    out = p.build(extra="some notes")
+    assert out.rstrip(".").endswith("W1AW")
+
+
+def test_explicit_nato_words_in_default_vocab() -> None:
+    p = PromptBuilder()
+    out = p.build()
+    # If Whisper sees the NATO words in-context, it's biased to keep them
+    # literal instead of guessing common-language homophones.
+    for word in ("kilo", "foxtrot", "whiskey", "zulu"):
+        assert word in out.lower(), f"missing NATO word {word!r}"

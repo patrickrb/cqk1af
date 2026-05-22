@@ -13,10 +13,11 @@ import asyncio
 from dataclasses import dataclass
 
 from ..audio.vad import Utterance
-from ..events import CallsignHeard, EventBus, TranscriptFinal
+from ..events import CallsignHeard, EventBus, TranscriptDropped, TranscriptFinal
 from ..nlp.callsign_extractor import extract_callsigns
 from ..util.logging import get_logger
-from .prompt_builder import PromptBuilder
+from .hallucination import is_likely_hallucination
+from .prompt_builder import PromptBuilder, Stage
 from .whisper_engine import STTEngine, TranscriptionResult
 
 log = get_logger(__name__)
@@ -30,6 +31,7 @@ class TranscriberConfig:
     min_confidence: float = 0.0
     extract_callsigns: bool = True
     min_callsign_confidence: float = 0.5
+    drop_hallucinations: bool = True
 
 
 class Transcriber:
@@ -45,19 +47,64 @@ class Transcriber:
         self.prompts = prompt_builder or PromptBuilder()
         self.cfg = cfg or TranscriberConfig()
         self._inflight: set[asyncio.Task] = set()
+        self._stage: Stage | None = None
+
+    def set_stage(self, stage: Stage | None) -> None:
+        """Hint the current session stage for prompt biasing.
+
+        Callers (typically the audio pipeline reacting to ``StateChanged``)
+        update this so the next transcription's prompt is stage-specific.
+        """
+        self._stage = stage
 
     async def transcribe_utterance(self, utt: Utterance) -> TranscriptionResult | None:
-        prompt = self.prompts.build(extra=self.cfg.extra_prompt, own_callsign=self.cfg.own_callsign or None)
+        prompt = self.prompts.build(
+            extra=self.cfg.extra_prompt,
+            own_callsign=self.cfg.own_callsign or None,
+            stage=self._stage,
+        )
         try:
             result = await self.engine.transcribe(
                 utt.pcm, sample_rate=utt.sample_rate, initial_prompt=prompt
             )
-        except Exception:
+        except Exception as e:
             log.exception("stt.transcribe_failed")
+            await self.bus.publish(
+                TranscriptDropped(reason=f"transcribe_error: {e}", text="")
+            )
             return None
         text = result.text.strip()
         if len(text) < self.cfg.min_text_chars:
+            await self.bus.publish(
+                TranscriptDropped(
+                    reason="empty_or_too_short",
+                    text=text,
+                    no_speech_prob=result.no_speech_prob,
+                )
+            )
             return None
+        if self.cfg.drop_hallucinations:
+            audio_duration_s = len(utt.pcm) / 2.0 / max(1, utt.sample_rate)
+            drop, reason = is_likely_hallucination(
+                text,
+                no_speech_prob=result.no_speech_prob,
+                audio_duration_s=audio_duration_s,
+            )
+            if drop:
+                log.info(
+                    "stt.hallucination_dropped",
+                    text=text,
+                    reason=reason,
+                    no_speech_prob=result.no_speech_prob,
+                )
+                await self.bus.publish(
+                    TranscriptDropped(
+                        reason=f"hallucination:{reason}",
+                        text=text,
+                        no_speech_prob=result.no_speech_prob,
+                    )
+                )
+                return None
         if result.confidence < self.cfg.min_confidence:
             log.info(
                 "stt.low_confidence",

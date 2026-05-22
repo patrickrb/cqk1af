@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Settings
-from ..events import EventBus
+from ..events import AudioPipelineStatus, EventBus
 from ..radio.base import RadioClient
 from ..stt.transcriber import Transcriber, TranscriberConfig
 from ..stt.whisper_engine import MockSTTEngine, STTEngine, TranscriptionResult, WhisperSTTEngine
@@ -43,6 +43,22 @@ class AudioStatus:
     tx_device: str = ""
     piper_bin: str = ""
     notes: list[str] = field(default_factory=list)
+    # Diagnostic counters. Bumped from the capture loop, VAD events, and the
+    # transcriber so the dashboard can tell where the chain breaks when no
+    # transcripts appear despite a healthy can_rx.
+    frames_seen: int = 0
+    # Per-frame VAD verdicts — if this stays at 0 while frames_seen climbs,
+    # webrtcvad isn't classifying the audio as speech (try lowering
+    # vad_aggressiveness in config).
+    voice_frames: int = 0
+    voice_utterances: int = 0
+    stt_attempts: int = 0
+    stt_results: int = 0
+    stt_dropped: int = 0
+    last_stt_error: str = ""
+    # Last observed RMS in dBFS over the capture frame window. Operator-visible
+    # so "Is audio actually flowing?" has a one-glance answer.
+    rx_rms_dbfs: float = -120.0
 
     @property
     def can_rx(self) -> bool:
@@ -68,6 +84,14 @@ class AudioStatus:
             "can_rx": self.can_rx,
             "can_tx": self.can_tx,
             "notes": list(self.notes),
+            "frames_seen": self.frames_seen,
+            "voice_frames": self.voice_frames,
+            "voice_utterances": self.voice_utterances,
+            "stt_attempts": self.stt_attempts,
+            "stt_results": self.stt_results,
+            "stt_dropped": self.stt_dropped,
+            "last_stt_error": self.last_stt_error,
+            "rx_rms_dbfs": round(self.rx_rms_dbfs, 1),
         }
 
 
@@ -99,6 +123,13 @@ class AudioPipeline:
         self._tx_device_index: int | None = None
         self._rx_device_index: int | None = None
         self._started = False
+        self._voice_sub: object | None = None
+        self._transcript_sub: object | None = None
+        self._rx_connect_sub: object | None = None
+        self._status_publish_task: asyncio.Task | None = None
+        # When did we last broadcast the metrics-bearing status? Coalesced so
+        # high-rate counter updates produce at most one WS message per second.
+        self._last_status_publish: float = 0.0
 
     # ---- lifecycle --------------------------------------------------
 
@@ -117,8 +148,88 @@ class AudioPipeline:
         self._init_tts()
         await self._init_vad()
         await self._maybe_start_capture()
+        await self._wire_metric_subs()
+        # Eagerly trigger Whisper's model load on a background task so the user
+        # sees "model_loading" / a load error rather than silent first-call
+        # delay (distil-large-v3 download is ~600 MB; current dashboards just
+        # showed an empty feed for 30+ seconds while it pulled).
+        await self._kickoff_model_load()
         self._started = True
         log.info("audio_pipeline.started", status=self.status.to_dict())
+        await self._publish_status()
+
+    async def _wire_metric_subs(self) -> None:
+        from ..events import TranscriptDropped, TranscriptFinal, VoiceActivityStopped
+
+        async def on_voice_stop(ev) -> None:  # noqa: ANN001
+            if isinstance(ev, VoiceActivityStopped):
+                self.status.voice_utterances += 1
+                await self._publish_status_throttled()
+
+        async def on_transcript(ev) -> None:  # noqa: ANN001
+            if isinstance(ev, TranscriptFinal) and ev.direction == "rx":
+                self.status.stt_results += 1
+                await self._publish_status_throttled()
+
+        async def on_drop(ev) -> None:  # noqa: ANN001
+            if isinstance(ev, TranscriptDropped):
+                self.status.stt_dropped += 1
+                self.status.last_stt_error = f"{ev.reason}: {ev.text[:48]}"
+                await self._publish_status_throttled()
+
+        self._voice_sub = await self.bus.subscribe(
+            "audio.voice_stopped", on_voice_stop, name="pipeline.metrics.voice"
+        )
+        self._transcript_sub = await self.bus.subscribe(
+            "transcript.final", on_transcript, name="pipeline.metrics.transcript"
+        )
+        await self.bus.subscribe(
+            "transcript.dropped", on_drop, name="pipeline.metrics.dropped"
+        )
+
+    async def _kickoff_model_load(self) -> None:
+        """Load Whisper eagerly on a background task and stamp the result.
+
+        Lazy load on first transcribe call is fine for tests but for live
+        operation a 30-second silent wait while the model downloads looks like
+        a broken pipeline. Doing it here lets the dashboard say "loading…".
+        """
+        if not isinstance(self.stt, WhisperSTTEngine):
+            return
+
+        async def _load() -> None:
+            try:
+                self.status.notes.append("whisper.model_loading")
+                await self._publish_status()
+                await self.stt._ensure_model()  # type: ignore[attr-defined]  # SLF001
+                # Drop the loading note now that it's ready
+                self.status.notes = [n for n in self.status.notes if n != "whisper.model_loading"]
+                self.status.notes.append("whisper.model_loaded")
+                await self._publish_status()
+            except Exception as e:
+                self.status.notes = [n for n in self.status.notes if n != "whisper.model_loading"]
+                self.status.stt_engine = f"whisper_load_failed: {e}"
+                self.status.last_stt_error = f"model_load: {e}"
+                log.exception("audio_pipeline.whisper_load_failed")
+                await self._publish_status()
+
+        asyncio.create_task(_load(), name="audio_pipeline.whisper_load")
+
+    async def _publish_status_throttled(self) -> None:
+        """Publish at most ~1 status event/sec while counters tick."""
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        if now - self._last_status_publish < 1.0:
+            return
+        self._last_status_publish = now
+        await self._publish_status()
+
+    async def _publish_status(self) -> None:
+        """Push the current AudioStatus onto the bus so the dashboard mirrors it."""
+        try:
+            await self.bus.publish(AudioPipelineStatus(status=self.status.to_dict()))
+        except Exception:
+            log.exception("audio_pipeline.status_publish_failed")
 
     async def stop(self) -> None:
         if self._capture_loop_task is not None:
@@ -135,6 +246,21 @@ class AudioPipeline:
             except Exception:
                 log.exception("audio_pipeline.capture_stop_failed")
             self._capture_stream = None
+        # Tear down the native RX stream if it was open.
+        if self.radio is not None and self.radio.supports_native_rx_audio:
+            try:
+                await self.radio.stop_rx_audio()
+            except Exception:
+                log.exception("audio_pipeline.native_rx_stop_failed")
+        for sub in (self._voice_sub, self._transcript_sub, self._rx_connect_sub):
+            if sub is not None:
+                try:
+                    await self.bus.unsubscribe(sub)  # type: ignore[arg-type]
+                except Exception:
+                    pass
+        self._voice_sub = None
+        self._transcript_sub = None
+        self._rx_connect_sub = None
         if self.transcriber is not None:
             await self.transcriber.aclose()
         self._started = False
@@ -181,6 +307,27 @@ class AudioPipeline:
     # ---- internals: device probe ------------------------------------
 
     def _probe_devices(self) -> None:
+        # Hot path: if the radio backend will deliver both RX and TX natively
+        # (FlexLib), skip sounddevice entirely. Even just calling
+        # ``sd.query_devices()`` forces PortAudio to fully enumerate WASAPI,
+        # and on this machine that enumeration alone makes SmartSDR's DAX
+        # driver flip "PC Audio" off — we lose the operator's speakers without
+        # ever opening a stream. The FlexLib path doesn't need any Windows
+        # audio device, so don't touch PortAudio at all.
+        if (
+            self.radio is not None
+            and self._radio_can_have_native_rx()
+            and self._radio_can_have_native_tx()
+        ):
+            # rx_capture will flip to "ok" inside _start_native_rx_capture once
+            # the radio connects. tx_playback flips to "ok" when we observe
+            # supports_native_tx_audio (radio.connect opens that stream).
+            self.status.rx_device = "FlexLib DAX RX 1 (UDP stream)"
+            self.status.tx_device = "FlexLib DAX TX (UDP stream)"
+            self.status.rx_capture = "waiting for radio.connect"
+            self.status.tx_playback = "waiting for radio.connect"
+            return
+
         try:
             import sounddevice as sd  # type: ignore[import-not-found]
             import numpy as np  # type: ignore[import-not-found]
@@ -267,7 +414,13 @@ class AudioPipeline:
             )
 
         if self._rx_device_index is None:
-            self.status.rx_capture = f'RX device not found (looked for "{rx_name}"). Is SmartSDR running?'
+            # Only flag "device not found" if we're going to use it. When the
+            # radio supports native RX audio (FlexLib UDP stream), the Windows
+            # DAX device is irrelevant — and not opening it is the whole point.
+            if self.radio is None or not self.radio.supports_native_rx_audio:
+                self.status.rx_capture = (
+                    f'RX device not found (looked for "{rx_name}"). Is SmartSDR running?'
+                )
         if self._tx_device_index is None:
             self.status.tx_playback = f'TX device not found (looked for "{tx_name}"). Is SmartSDR running?'
         else:
@@ -299,6 +452,7 @@ class AudioPipeline:
                 frame_ms=self.settings.audio.frame_ms,
                 aggressiveness=self.settings.audio.vad_aggressiveness,
                 hangover_ms=self.settings.audio.vad_hangover_ms,
+                max_utterance_ms=int(self.settings.audio.max_utterance_seconds * 1000),
             )
             self._vad = VoiceActivityDetector(self.bus, cfg, channel="rx")
         except Exception as e:
@@ -309,12 +463,20 @@ class AudioPipeline:
         if self.stt is not None:
             from ..stt.prompt_builder import PromptBuilder
 
+            prompts = PromptBuilder()
+            op = self.settings.operator
+            prompts.set_operator(
+                callsign=op.callsign,
+                name=op.name,
+                qth=op.qth,
+                grid=op.grid_square,
+            )
             self.transcriber = Transcriber(
                 self.bus,
                 self.stt,
-                PromptBuilder(),
+                prompts,
                 TranscriberConfig(
-                    own_callsign=self.settings.operator.callsign,
+                    own_callsign=op.callsign,
                     extra_prompt=self.settings.stt.initial_prompt_extra,
                 ),
             )
@@ -364,6 +526,21 @@ class AudioPipeline:
     # ---- internals: capture ----------------------------------------
 
     async def _maybe_start_capture(self) -> None:
+        # Preferred path: FlexLib's DAX RX audio stream. It rides FlexLib's
+        # UDP channel; no Windows audio device is opened, so SmartSDR doesn't
+        # drop PC Audio routing when capture comes online. Falls back to the
+        # Windows DAX device only if the backend doesn't support native RX.
+        #
+        # The radio likely isn't connected yet at pipeline.start() time (the
+        # operator calls connect_radio later), so we also defer-start on the
+        # RadioConnected event below.
+        if self.radio is not None and self.radio.supports_native_rx_audio:
+            await self._start_native_rx_capture()
+            return
+        if self.radio is not None and self._radio_can_have_native_rx():
+            # Wait for connect — we'll bring the stream up then.
+            await self._subscribe_for_native_rx_on_connect()
+            return
         if self._sd is None or self._np is None or self._rx_device_index is None or self._vad is None:
             return
         try:
@@ -387,6 +564,14 @@ class AudioPipeline:
                     n = (mono.shape[0] // ratio) * ratio
                     mono = mono[:n].reshape(-1, ratio).mean(axis=1)
                 clipped = np.clip(mono, -1.0, 1.0)
+                # Cheap RMS dBFS — gives the operator a one-glance "is audio
+                # flowing?" answer when the transcript feed stays empty.
+                try:
+                    rms = float(np.sqrt(np.mean(clipped.astype(np.float32) ** 2)) + 1e-12)
+                    dbfs = 20.0 * float(np.log10(rms))
+                    self.status.rx_rms_dbfs = dbfs
+                except Exception:
+                    pass
                 pcm = (clipped * 32767.0).astype(np.int16).tobytes()
                 # Drop oldest on overflow
                 loop.call_soon_threadsafe(self._enqueue_frame, queue, pcm, frame_bytes_out)
@@ -408,6 +593,131 @@ class AudioPipeline:
             log.exception("audio_pipeline.capture_start_failed")
             self.status.rx_capture = f"capture start failed: {e}"
 
+    def _radio_can_have_native_rx(self) -> bool:
+        """True if the configured radio backend *will* support native RX once
+        connected, even if it currently doesn't (radio not connected yet)."""
+        # FlexLibRadioClient is the only one that delivers native RX today,
+        # and it advertises supports_native_rx_audio once Radio is non-None
+        # (post-connect). Identify the class by name to avoid importing
+        # FlexLibRadioClient here — that import drags in pythonnet.
+        return type(self.radio).__name__ == "FlexLibRadioClient"
+
+    def _radio_can_have_native_tx(self) -> bool:
+        """Mirror of ``_radio_can_have_native_rx`` for the TX direction."""
+        return type(self.radio).__name__ == "FlexLibRadioClient"
+
+    async def _subscribe_for_native_rx_on_connect(self) -> None:
+        """Bring the native RX stream up the moment the radio reports connected.
+
+        Idempotent: once the stream is open we ignore further connect events.
+        """
+        if self._rx_connect_sub is not None:
+            return
+        from ..events import RadioConnected
+
+        async def on_connect(ev) -> None:  # noqa: ANN001
+            if not isinstance(ev, RadioConnected):
+                return
+            if self.radio is None or not self.radio.supports_native_rx_audio:
+                return
+            # Mirror TX availability into the status now that the FlexLib TX
+            # stream is also open (radio.connect builds it).
+            if self.radio.supports_native_tx_audio:
+                self.status.tx_playback = "ok"
+            # _start_native_rx_capture sets rx_capture="ok" on success and
+            # rx_capture="native rx start failed: ..." on failure. Either way
+            # the dashboard learns about it via _publish_status_throttled().
+            await self._start_native_rx_capture()
+            await self._publish_status()
+
+        self.status.rx_capture = "waiting for radio.connect"
+        self._rx_connect_sub = await self.bus.subscribe(
+            "radio.connected", on_connect, name="pipeline.native_rx_on_connect"
+        )
+
+    async def _start_native_rx_capture(self) -> None:
+        """Subscribe to the radio's native DAX RX audio stream (FlexLib).
+
+        FlexLib delivers 24 kHz mono float32 frames on its UDP worker thread
+        via the registered handler. We downsample 24 → 16 kHz, convert to
+        int16, frame-align to the VAD's expected size, and push onto the same
+        async queue the sounddevice path uses.
+        """
+        if self.radio is None or self._vad is None:
+            return
+
+        # numpy is required for the downsample + format conversion. It's part
+        # of the audio extras and pythonnet pulls it in via flexlib_client too.
+        try:
+            import numpy as np  # type: ignore[import-not-found]
+        except Exception as e:
+            self.status.rx_capture = f"numpy not installed: {e}"
+            return
+
+        sample_rate_in = 24000  # FlexLib DAX RX wire format
+        sample_rate_out = 16000  # webrtcvad + faster-whisper input
+        frame_ms = self.settings.audio.frame_ms
+        frame_bytes_out = int(sample_rate_out * 2 * frame_ms / 1000)
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
+
+        # Diagnostic: count handler invocations from inside the closure so we
+        # can tell whether DataReady fires our handler but the enqueue path
+        # silently drops frames, vs. DataReady never reaching us at all.
+        rx_call_count = [0]
+        first_call_noted = [False]
+
+        def rx_handler(samples, _sr) -> None:  # noqa: ANN001
+            # Runs on FlexLib's UDP worker thread. Keep work minimal.
+            rx_call_count[0] += 1
+            if not first_call_noted[0]:
+                first_call_noted[0] = True
+                self.status.notes.append(
+                    f"native_rx_handler_first_call (samples={samples.size})"
+                )
+                log.info("audio_pipeline.native_rx_handler_first_call", samples=samples.size)
+            if samples.size == 0:
+                return
+            clipped = np.clip(samples, -1.0, 1.0)
+            try:
+                rms = float(np.sqrt(np.mean(clipped.astype(np.float32) ** 2)) + 1e-12)
+                self.status.rx_rms_dbfs = 20.0 * float(np.log10(rms))
+            except Exception:
+                pass
+            # Linear-decimate 24 → 16 kHz (ratio 1.5). Take every 3rd sample
+            # of an upsample-by-2 view: equivalent to picking samples at
+            # indices [0, 1.5, 3.0, 4.5, ...] linearly interpolated. Cheap
+            # and adequate for speech-bandwidth audio.
+            ratio = sample_rate_in / sample_rate_out
+            out_len = int(clipped.size / ratio)
+            if out_len == 0:
+                return
+            idx_f = np.arange(out_len, dtype=np.float32) * ratio
+            idx = idx_f.astype(np.int64)
+            frac = (idx_f - idx).astype(np.float32)
+            idx_next = np.minimum(idx + 1, clipped.size - 1)
+            decimated = (
+                clipped[idx].astype(np.float32) * (1.0 - frac)
+                + clipped[idx_next].astype(np.float32) * frac
+            )
+            pcm = (decimated * 32767.0).astype(np.int16).tobytes()
+            loop.call_soon_threadsafe(self._enqueue_frame, queue, pcm, frame_bytes_out)
+
+        self.radio.set_rx_audio_handler(rx_handler)
+        try:
+            await self.radio.start_rx_audio(channel=1)
+        except Exception as e:
+            log.exception("audio_pipeline.native_rx_start_failed")
+            self.status.rx_capture = f"native rx start failed: {e}"
+            return
+
+        self.status.rx_capture = "ok"
+        self.status.rx_device = "FlexLib DAX RX 1 (UDP stream)"
+        self._capture_loop_task = asyncio.create_task(
+            self._capture_loop(queue, frame_bytes_out), name="audio_pipeline.capture"
+        )
+
     def _enqueue_frame(self, queue: asyncio.Queue, pcm: bytes, frame_bytes_out: int) -> None:
         # The audio callback may produce frames sized to its block; we accumulate
         # exact ``frame_bytes_out``-sized chunks in `_carry` so VAD always gets
@@ -428,6 +738,16 @@ class AudioPipeline:
         try:
             while True:
                 frame = await queue.get()
+                self.status.frames_seen += 1
+                # First frame: publish immediately (bypass throttle) so the
+                # dashboard sees "capture is alive" within a sample-block of
+                # SmartSDR's DAX delivering audio. Then heartbeat every ~1 s
+                # for a live RMS gauge. (1 frame = 20 ms → 50 frames/s.)
+                if self.status.frames_seen == 1:
+                    await self._publish_status()
+                    self._last_status_publish = asyncio.get_running_loop().time()
+                elif self.status.frames_seen % 50 == 0:
+                    await self._publish_status_throttled()
                 if self._vad is None:
                     continue
                 try:
@@ -435,7 +755,13 @@ class AudioPipeline:
                 except Exception:
                     log.exception("audio_pipeline.vad_error")
                     continue
+                # Mirror the VAD's running voice-frame count into the status
+                # snapshot. Cheap (a single attribute read) and lets the
+                # dashboard show "voice_frames=0" when webrtcvad is rejecting
+                # all of the audio.
+                self.status.voice_frames = self._vad.voice_frame_count
                 if utt is not None and self.transcriber is not None:
+                    self.status.stt_attempts += 1
                     self.transcriber.submit(utt)
         except asyncio.CancelledError:
             return

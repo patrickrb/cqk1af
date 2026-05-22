@@ -40,8 +40,17 @@ class AudioCfg(BaseModel):
     tx_device: str = "DAX Audio TX"
     sample_rate: int = 48000
     frame_ms: int = 20
-    vad_aggressiveness: int = Field(default=3, ge=0, le=3)
+    # webrtcvad aggressiveness 0..3. 3 (most aggressive) rejects SSB voice
+    # outright — the narrow 2.7 kHz bandwidth and continuous band noise don't
+    # match its telephone-voice model. 1 over-corrects: band noise itself
+    # registers as speech, so VAD never sees a silent gap to close an
+    # utterance. 2 is the working middle.
+    vad_aggressiveness: int = Field(default=2, ge=0, le=3)
     vad_hangover_ms: int = 300
+    # Hard cap on a single utterance so STT still gets fed when VAD never
+    # sees silence (band noise = continuous "speech"). Real human turns on
+    # SSB rarely exceed ~10 s before a pause; cap at 8 s.
+    max_utterance_seconds: float = 8.0
 
 
 class SttCfg(BaseModel):
@@ -54,6 +63,23 @@ class SttCfg(BaseModel):
         "Amateur radio QSO. Callsigns like W1AW, K1AF, KC1ABC. "
         "Signal report five nine. QSL, QSB, QRM, 73, CQ, QRZ."
     )
+    # Decoder fallback temperatures. faster-whisper steps through these when
+    # compression_ratio_threshold or log_prob_threshold fails.
+    temperatures: list[float] = Field(
+        default_factory=lambda: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    )
+    # Stricter than the 2.4 default — Whisper loves to repeat itself
+    # ("thank you thank you thank you...") on SSB static, and a tighter
+    # compression-ratio guard catches it.
+    compression_ratio_threshold: float = 2.2
+    # Looser than the -1.0 default — clean speech under band noise legitimately
+    # gets a worse logprob, and we don't want to nuke those segments.
+    log_prob_threshold: float = -1.2
+    # VAD already gates the audio that reaches Whisper, so we can be aggressive
+    # about declaring no-speech and dropping the segment.
+    no_speech_threshold: float = 0.7
+    # Per-word timestamps enable per-word confidence downstream.
+    word_timestamps: bool = True
 
 
 class TtsCfg(BaseModel):
@@ -101,11 +127,14 @@ class DashboardCfg(BaseModel):
 
 
 class Settings(BaseSettings):
+    # .env is loaded explicitly in ``load_settings`` (which builds the layered
+    # config dict and calls ``model_validate``), so we don't ask pydantic-
+    # settings to do it here. Adding ``env_file`` here would mean
+    # ``Settings()`` bare-constructor silently reads .env, which surprises
+    # tests that expect pure defaults.
     model_config = SettingsConfigDict(
         env_prefix="CQK1AF_",
         env_nested_delimiter="__",
-        env_file=".env",
-        env_file_encoding="utf-8",
         extra="ignore",
     )
 
@@ -158,13 +187,32 @@ _ENV_PREFIX = "CQK1AF_"
 _ENV_NESTED_SEP = "__"
 
 
-def _env_overlay(prefix: str = _ENV_PREFIX, sep: str = _ENV_NESTED_SEP) -> dict[str, Any]:
-    """Walk env vars matching ``prefix`` and build a nested dict.
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Minimal .env reader (KEY=value, # comments, blank lines)."""
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        # Strip surrounding quotes, if any.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        out[key] = value
+    return out
 
-    ``CQK1AF_OPERATOR__CALLSIGN=VE3ABC`` becomes ``{"operator": {"callsign": "VE3ABC"}}``.
-    """
+
+def _overlay_from_kv(
+    items: dict[str, str], *, prefix: str = _ENV_PREFIX, sep: str = _ENV_NESTED_SEP
+) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    for key, raw in os.environ.items():
+    for key, raw in items.items():
         if not key.startswith(prefix):
             continue
         tail = key[len(prefix) :]
@@ -173,18 +221,33 @@ def _env_overlay(prefix: str = _ENV_PREFIX, sep: str = _ENV_NESTED_SEP) -> dict[
         for p in parts[:-1]:
             cursor = cursor.setdefault(p, {})
             if not isinstance(cursor, dict):
-                # Conflict; skip rather than crash.
                 cursor = {}
         cursor[parts[-1]] = raw
     return out
+
+
+def _env_overlay(prefix: str = _ENV_PREFIX, sep: str = _ENV_NESTED_SEP) -> dict[str, Any]:
+    """Walk env vars matching ``prefix`` and build a nested dict.
+
+    ``CQK1AF_OPERATOR__CALLSIGN=VE3ABC`` becomes ``{"operator": {"callsign": "VE3ABC"}}``.
+    """
+    return _overlay_from_kv(dict(os.environ), prefix=prefix, sep=sep)
 
 
 def load_settings(
     *,
     default_yaml: Path | None = Path("config/default.yaml"),
     user_yaml: Path | None = None,
+    env_file: Path | None = Path(".env"),
 ) -> Settings:
-    """Layered config (highest precedence last): default YAML → user YAML → env vars."""
+    """Layered config (highest precedence last):
+
+    default YAML → user YAML → ``.env`` file → process env vars.
+
+    Note: ``Settings.model_validate(layered)`` bypasses pydantic-settings'
+    built-in env-file handling, so we read ``.env`` here explicitly. Otherwise
+    the file referenced by ``.env.example`` silently does nothing.
+    """
     if user_yaml is None:
         user_yaml = Path.home() / ".cqk1af" / "config.yaml"
 
@@ -192,6 +255,8 @@ def load_settings(
     if default_yaml is not None:
         layered = _deep_merge(layered, _load_yaml(default_yaml))
     layered = _deep_merge(layered, _load_yaml(user_yaml))
+    if env_file is not None:
+        layered = _deep_merge(layered, _overlay_from_kv(_parse_env_file(env_file)))
     layered = _deep_merge(layered, _env_overlay())
 
     return Settings.model_validate(layered) if layered else Settings()
