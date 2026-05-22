@@ -478,6 +478,7 @@ class AudioPipeline:
                 TranscriberConfig(
                     own_callsign=op.callsign,
                     extra_prompt=self.settings.stt.initial_prompt_extra,
+                    extra_hotwords=self.settings.stt.hotwords_extra,
                 ),
             )
 
