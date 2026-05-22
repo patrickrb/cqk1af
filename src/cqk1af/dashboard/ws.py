@@ -281,6 +281,12 @@ class WSHub:
 
     async def _on_tx_approval(self, ev: Event) -> None:
         assert isinstance(ev, TxApprovalRequested)
+        from ..util.time import utcnow
+
+        # Send a relative timeout alongside expires_at so the client doesn't
+        # depend on the server/client wall clocks agreeing. Clock skew was
+        # making the auto-deny setTimeout fire immediately on render.
+        timeout_s = max(0.0, (ev.expires_at - utcnow()).total_seconds())
         await self._broadcast(
             {
                 "type": "tx_approval_requested",
@@ -289,6 +295,7 @@ class WSHub:
                     "summary": ev.summary,
                     "payload": ev.payload,
                     "expires_at": ev.expires_at.isoformat(),
+                    "timeout_s": timeout_s,
                 },
             }
         )

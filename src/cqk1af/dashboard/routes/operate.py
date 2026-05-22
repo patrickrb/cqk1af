@@ -49,6 +49,10 @@ class SimulateCallerRequest(BaseModel):
     snr_dbm: float | None = -55.0
 
 
+class ManualTxRequest(BaseModel):
+    text: str
+
+
 def build_operate_router(tools_provider) -> APIRouter:  # noqa: ANN001
     r = APIRouter(prefix="/api/operate", tags=["operate"])
 
@@ -127,6 +131,16 @@ def build_operate_router(tools_provider) -> APIRouter:  # noqa: ANN001
     ) -> QSOContextDTO:
         try:
             return await tools.confirm_and_log_qso(edits=req.edits)
+        except ToolError as e:
+            _raise_tool_error(e)
+            raise
+
+    @r.post("/manual_tx")
+    async def manual_tx(
+        req: ManualTxRequest, tools: MCPTools = Depends(_get_tools)
+    ) -> dict:
+        try:
+            return await tools.manual_tx(text=req.text)
         except ToolError as e:
             _raise_tool_error(e)
             raise

@@ -6,6 +6,8 @@ after each character.
 """
 from __future__ import annotations
 
+import re
+
 NATO_FROM_LETTER: dict[str, str] = {
     "A": "alpha",
     "B": "bravo",
@@ -77,6 +79,30 @@ def render_cq_template(template: str, *, callsign: str) -> str:
         .replace("{callsign_phonetic}", phon)
         .replace("{callsign}", callsign.upper())
     )
+
+
+# Same shape used by the literal pass in nlp/callsign_extractor.py — keep them
+# aligned so phoneticization matches what the extractor would recognise.
+_CALLSIGN_SHAPE_RE = re.compile(r"\b[A-Z]{1,2}\d{1,4}[A-Z]{1,3}(?:/[A-Z0-9]{1,4})?\b")
+
+
+def phoneticize_callsigns_in_text(text: str) -> str:
+    """Replace callsign-shaped tokens with their NATO phonetic rendering.
+
+    Surrounding prose is left untouched. Matching is case-sensitive against
+    the uppercased copy of ``text``, so "k1af" written lowercase is also
+    converted. Used by manual_tx so operator-typed corrections come out
+    clearly on the air.
+    """
+    upper = text.upper()
+    out: list[str] = []
+    last = 0
+    for m in _CALLSIGN_SHAPE_RE.finditer(upper):
+        out.append(text[last:m.start()])
+        out.append(phonetic_callsign(m.group(0)))
+        last = m.end()
+    out.append(text[last:])
+    return "".join(out)
 
 
 def render_freq_check(callsign: str, *, attempt: int) -> str:

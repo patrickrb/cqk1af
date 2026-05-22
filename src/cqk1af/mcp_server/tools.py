@@ -29,7 +29,12 @@ from ..events import (
 )
 from ..radio.band_plan import Allowed
 from ..state.context import HeardCallsign, QSOContext
-from ..tts.phonetic import phonetic_callsign, render_cq_template, render_freq_check
+from ..tts.phonetic import (
+    phoneticize_callsigns_in_text,
+    phonetic_callsign,
+    render_cq_template,
+    render_freq_check,
+)
 from ..state.machine import IllegalTransition
 from ..state.states import Event, State
 from ..util.logging import get_logger
@@ -553,6 +558,65 @@ class MCPTools:
         # Surface the cloudlog id (empty until syncer completes)
         _ = record  # record is the stored row; cloudlog_id fills in async
         return result
+
+    async def manual_tx(self, text: str) -> dict[str, Any]:
+        """Operator-typed correction TX.
+
+        Used when the assistant said the wrong thing on the air and the operator
+        needs to override with custom text. Goes through the full TX gate
+        (band-plan + interlock approval), keys PTT, and speaks via Piper. Does
+        not change FSM state — the QSO/CQ flow continues from wherever it was.
+        """
+        self._require_armed()
+        text = (text or "").strip()
+        if not text:
+            raise ToolError("empty_text", "manual_tx requires non-empty text")
+        if len(text) > 500:
+            raise ToolError("text_too_long", "manual_tx text limited to 500 chars")
+        sess = self.app.fsm.session
+        # Session-tracked freq is only populated once tune_slice fires from the
+        # dashboard. If the operator armed and went straight to a correction,
+        # fall back to whatever slice the radio is actually sitting on.
+        freq_hz = sess.current_freq_hz
+        mode = sess.current_mode
+        slice_id = sess.current_slice_id
+        if not freq_hz:
+            radio_slice = self.app.radio.state.slices.get(slice_id) if self.app.radio.state.slices else None
+            if radio_slice is None and self.app.radio.state.slices:
+                radio_slice = next(iter(self.app.radio.state.slices.values()))
+                slice_id = radio_slice.slice_id
+            if radio_slice is not None:
+                freq_hz = radio_slice.freq_hz
+                mode = mode or radio_slice.mode
+        if not freq_hz:
+            raise ToolError(
+                "no_tuned_frequency",
+                "Manual TX needs a tuned slice — pick a frequency from the band list first.",
+            )
+        decision = self.app.band_plan.is_tx_allowed(
+            freq_hz,
+            mode or "USB",
+            self.app.settings.operator.license_class,
+        )
+        if not isinstance(decision, Allowed):
+            raise ToolError("tx_denied_by_band_plan", decision.reason)
+        token = await self.app.interlock.request_tx(
+            summary=f"Manual TX: {text[:80]}",
+            slice_id=slice_id,
+            purpose="manual_tx",
+            payload={"text": text, "freq_hz": freq_hz},
+        )
+        if token is None:
+            raise ToolError("tx_denied", "Manual TX denied")
+        spoken = phoneticize_callsigns_in_text(text)
+        await self._narrate_tx(spoken, purpose="manual_tx", token=token)
+        # Only count this transmission as a station ID if the operator's
+        # callsign was actually in the text — otherwise the §97.119 timer
+        # would drift.
+        op_call = (self.app.settings.operator.callsign or "").upper()
+        if op_call and op_call in text.upper():
+            self.app.id_timer.mark_id_sent()
+        return {"text": text, "spoken": spoken}
 
     # --- SAFETY --------------------------------------------------------
 

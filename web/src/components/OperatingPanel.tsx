@@ -32,6 +32,8 @@ export function OperatingPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [simCall, setSimCall] = useState("W1AW");
+  const [manualText, setManualText] = useState("");
+  const [manualBusy, setManualBusy] = useState(false);
 
   // SSB sideband convention: LSB below 10 MHz, USB above.
   const effectiveMode: "USB" | "LSB" = band === "80m" || band === "40m" ? "LSB" : "USB";
@@ -85,6 +87,21 @@ export function OperatingPanel() {
 
   async function completeQso() {
     await call("/api/operate/complete_qso", { closing_phrase: "73" });
+  }
+
+  async function sendManualTx() {
+    const text = manualText.trim();
+    if (!text) return;
+    setError(null);
+    setManualBusy(true);
+    try {
+      await apiPost("/api/operate/manual_tx", { text });
+      setManualText("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setManualBusy(false);
+    }
   }
 
   async function simulateCaller() {
@@ -248,6 +265,40 @@ export function OperatingPanel() {
           <button onClick={completeQso} disabled={busy} className="btn btn-secondary">
             Complete QSO (73)
           </button>
+        </div>
+      )}
+
+      {armed && (
+        <div className="mt-3 pt-3 border-t border-slate-800">
+          <label className="text-xs uppercase tracking-wider text-slate-400 mb-1 block">
+            Manual TX — operator correction
+          </label>
+          <textarea
+            value={manualText}
+            onChange={(e) => setManualText(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                e.preventDefault();
+                sendManualTx();
+              }
+            }}
+            placeholder="Type what to say on the air. Callsigns like K1AF are auto-phoneticized."
+            rows={2}
+            disabled={manualBusy}
+            className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm font-mono resize-y"
+          />
+          <div className="flex items-center justify-between mt-1">
+            <span className="text-[10px] text-slate-500">
+              Approval modal still gates the TX. Ctrl/⌘+Enter to send.
+            </span>
+            <button
+              onClick={sendManualTx}
+              disabled={manualBusy || !manualText.trim()}
+              className="btn btn-tx text-xs"
+            >
+              {manualBusy ? "Sending…" : "Send TX"}
+            </button>
+          </div>
         </div>
       )}
 
