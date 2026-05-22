@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from ..audio.vad import Utterance
 from ..events import CallsignHeard, EventBus, TranscriptDropped, TranscriptFinal
 from ..nlp.callsign_extractor import extract_callsigns
+from ..nlp.lingo_corrector import correct_lingo
 from ..util.logging import get_logger
 from .hallucination import is_likely_hallucination
 from .prompt_builder import PromptBuilder, Stage
@@ -31,6 +32,7 @@ log = get_logger(__name__)
 class TranscriberConfig:
     own_callsign: str = ""
     extra_prompt: str = ""
+    extra_hotwords: str = ""
     min_text_chars: int = 1
     min_confidence: float = 0.0
     extract_callsigns: bool = True
@@ -62,14 +64,18 @@ class Transcriber:
         self._stage = stage
 
     async def transcribe_utterance(self, utt: Utterance) -> TranscriptionResult | None:
-        prompt = self.prompts.build(
+        prompt, hotwords = self.prompts.build(
             extra=self.cfg.extra_prompt,
+            extra_hotwords=self.cfg.extra_hotwords,
             own_callsign=self.cfg.own_callsign or None,
             stage=self._stage,
         )
         try:
             result = await self.engine.transcribe(
-                utt.pcm, sample_rate=utt.sample_rate, initial_prompt=prompt
+                utt.pcm,
+                sample_rate=utt.sample_rate,
+                initial_prompt=prompt,
+                hotwords=hotwords,
             )
         except Exception as e:
             log.exception("stt.transcribe_failed")
@@ -77,7 +83,7 @@ class Transcriber:
                 TranscriptDropped(reason=f"transcribe_error: {e}", text="")
             )
             return None
-        text = result.text.strip()
+        text = correct_lingo(result.text.strip())
         if len(text) < self.cfg.min_text_chars:
             await self.bus.publish(
                 TranscriptDropped(

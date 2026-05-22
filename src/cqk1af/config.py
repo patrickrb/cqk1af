@@ -58,11 +58,17 @@ class SttCfg(BaseModel):
     model: str = "distil-large-v3"
     device: Literal["auto", "cpu", "cuda"] = "auto"
     compute_type: Literal["auto", "int8", "int8_float16", "float16", "float32"] = "auto"
-    beam_size: int = 1
+    # beam=5 trades modest CPU/GPU cost for materially better recognition on
+    # noisy SSB; beam=1 was leaving accuracy on the table for ham jargon.
+    beam_size: int = 5
     initial_prompt_extra: str = (
         "Amateur radio QSO. Callsigns like W1AW, K1AF, KC1ABC. "
         "Signal report five nine. QSL, QSB, QRM, 73, CQ, QRZ."
     )
+    # Extra terse jargon (space-separated) appended to faster-whisper's
+    # `hotwords` channel. Distinct from `initial_prompt_extra`: hotwords bias
+    # token sampling, prompt biases narrative context.
+    hotwords_extra: str = ""
     # Decoder fallback temperatures. faster-whisper steps through these when
     # compression_ratio_threshold or log_prob_threshold fails.
     temperatures: list[float] = Field(
@@ -78,6 +84,12 @@ class SttCfg(BaseModel):
     # VAD already gates the audio that reaches Whisper, so we can be aggressive
     # about declaring no-speech and dropping the segment.
     no_speech_threshold: float = 0.7
+    # Penalises repeated token n-grams at sampling time — backs up the
+    # post-filter against "thank you thank you" loops on band noise.
+    repetition_penalty: float = 1.1
+    # Drops segments spending more than this many seconds in low-probability
+    # silence territory. Decoder-level hook, cheaper than the post-filter.
+    hallucination_silence_threshold: float = 2.0
     # Per-word timestamps enable per-word confidence downstream.
     word_timestamps: bool = True
 

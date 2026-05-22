@@ -62,6 +62,7 @@ class STTEngine(ABC):
         *,
         sample_rate: int,
         initial_prompt: str = "",
+        hotwords: str = "",
         language: str = "en",
     ) -> TranscriptionResult: ...
 
@@ -111,6 +112,7 @@ class WhisperSTTEngine(STTEngine):
         *,
         sample_rate: int,
         initial_prompt: str = "",
+        hotwords: str = "",
         language: str = "en",
     ) -> TranscriptionResult:
         await self._ensure_model()
@@ -121,7 +123,12 @@ class WhisperSTTEngine(STTEngine):
         loop = asyncio.get_running_loop()
         try:
             segments, info = await loop.run_in_executor(
-                self._executor, self._run_inference, str(path), initial_prompt, language
+                self._executor,
+                self._run_inference,
+                str(path),
+                initial_prompt,
+                hotwords,
+                language,
             )
         finally:
             try:
@@ -138,19 +145,22 @@ class WhisperSTTEngine(STTEngine):
             duration_s=float(info.duration) if info else 0.0,
         )
 
-    def _run_inference(self, wav_path: str, prompt: str, language: str):
+    def _run_inference(self, wav_path: str, prompt: str, hotwords: str, language: str):
         assert self._model is not None
         segs, info = self._model.transcribe(
             wav_path,
             language=language or None,
             beam_size=self.cfg.beam_size,
             initial_prompt=prompt or None,
+            hotwords=hotwords or None,
             vad_filter=False,
             condition_on_previous_text=False,
             temperature=self.cfg.temperatures,
             compression_ratio_threshold=self.cfg.compression_ratio_threshold,
             log_prob_threshold=self.cfg.log_prob_threshold,
             no_speech_threshold=self.cfg.no_speech_threshold,
+            repetition_penalty=self.cfg.repetition_penalty,
+            hallucination_silence_threshold=self.cfg.hallucination_silence_threshold,
             word_timestamps=self.cfg.word_timestamps,
         )
         # segments is a generator; materialise.
@@ -161,10 +171,16 @@ class WhisperSTTEngine(STTEngine):
 
 
 class MockSTTEngine(STTEngine):
-    """Deterministic stub used in tests. Calls ``fn(pcm, sample_rate)``."""
+    """Deterministic stub used in tests. Calls ``fn(pcm, sample_rate)``.
+
+    Records the last ``initial_prompt`` / ``hotwords`` it received so tests
+    can assert what the Transcriber forwarded.
+    """
 
     def __init__(self, fn: Callable[[bytes, int], TranscriptionResult]) -> None:
         self.fn = fn
+        self.last_initial_prompt: str = ""
+        self.last_hotwords: str = ""
 
     async def transcribe(
         self,
@@ -172,8 +188,11 @@ class MockSTTEngine(STTEngine):
         *,
         sample_rate: int,
         initial_prompt: str = "",
+        hotwords: str = "",
         language: str = "en",
     ) -> TranscriptionResult:
+        self.last_initial_prompt = initial_prompt
+        self.last_hotwords = hotwords
         return self.fn(pcm, sample_rate)
 
 

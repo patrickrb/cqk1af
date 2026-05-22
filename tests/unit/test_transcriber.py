@@ -118,15 +118,61 @@ async def test_stage_hint_passed_to_prompt_builder() -> None:
     engine = MockSTTEngine(fake_engine)
 
     class CapturingPromptBuilder(PromptBuilder):
-        def build(self, *, extra="", own_callsign=None, stage=None):
-            seen_prompt["stage"] = stage or ""
-            return super().build(extra=extra, own_callsign=own_callsign, stage=stage)
+        def build(self, **kwargs):
+            seen_prompt["stage"] = kwargs.get("stage") or ""
+            return super().build(**kwargs)
 
     tr = Transcriber(bus, engine, CapturingPromptBuilder())
     tr.set_stage("calling_cq")
     utt = Utterance(pcm=b"\x00" * 320, sample_rate=16000, started_ts="", ended_ts="", frame_count=1)
     await tr.transcribe_utterance(utt)
     assert seen_prompt["stage"] == "calling_cq"
+    await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_hotwords_forwarded_to_engine() -> None:
+    bus = EventBus()
+    engine = MockSTTEngine(
+        lambda _pcm, _sr: TranscriptionResult(text="hello", avg_logprob=-0.2, no_speech_prob=0.05)
+    )
+    tr = Transcriber(bus, engine)
+    utt = Utterance(pcm=b"\x00" * 320, sample_rate=16000, started_ts="", ended_ts="", frame_count=1)
+    await tr.transcribe_utterance(utt)
+    assert engine.last_hotwords  # non-empty by default
+    assert "kilo" in engine.last_hotwords  # NATO bias
+    await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_contest_stage_hotwords_include_section() -> None:
+    bus = EventBus()
+    engine = MockSTTEngine(
+        lambda _pcm, _sr: TranscriptionResult(text="hello", avg_logprob=-0.2, no_speech_prob=0.05)
+    )
+    tr = Transcriber(bus, engine)
+    tr.set_stage("contest")
+    utt = Utterance(pcm=b"\x00" * 320, sample_rate=16000, started_ts="", ended_ts="", frame_count=1)
+    await tr.transcribe_utterance(utt)
+    assert "section" in engine.last_hotwords
+    assert "serial" in engine.last_hotwords
+    await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_transcriber_forwards_extra_hotwords() -> None:
+    bus = EventBus()
+    engine = MockSTTEngine(
+        lambda _pcm, _sr: TranscriptionResult(text="hello", avg_logprob=-0.2, no_speech_prob=0.05)
+    )
+    tr = Transcriber(
+        bus, engine, cfg=TranscriberConfig(extra_hotwords="POTA SOTA WWFF")
+    )
+    utt = Utterance(pcm=b"\x00" * 320, sample_rate=16000, started_ts="", ended_ts="", frame_count=1)
+    await tr.transcribe_utterance(utt)
+    assert "POTA" in engine.last_hotwords
+    assert "SOTA" in engine.last_hotwords
+    assert "WWFF" in engine.last_hotwords
     await bus.close()
 
 

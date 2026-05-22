@@ -34,7 +34,12 @@ stt:
   model: distil-large-v3
   device: auto
   compute_type: auto
-  beam_size: 1
+  beam_size: 5
+  repetition_penalty: 1.1
+  hallucination_silence_threshold: 2.0
+  # Space-separated terse jargon appended to the built-in `hotwords` list.
+  # Useful for DXpedition / contest-specific callsigns or local club nets.
+  hotwords_extra: ""
 
 tts:
   enabled: true
