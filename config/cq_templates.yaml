@@ -1,0 +1,12 @@
+templates:
+  default:
+    text: "CQ CQ CQ, this is {callsign_phonetic}, {callsign_phonetic}, calling CQ and standing by."
+
+  short:
+    text: "CQ CQ, {callsign_phonetic}, standing by."
+
+  dx:
+    text: "CQ DX, CQ DX, this is {callsign_phonetic}, {callsign_phonetic}, calling CQ DX and standing by."
+
+  contest:
+    text: "CQ contest, {callsign_phonetic}."

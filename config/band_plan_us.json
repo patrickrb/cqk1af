@@ -1,0 +1,125 @@
+{
+  "country": "US",
+  "regulator": "FCC Part 97",
+  "last_verified": "2025-11-01",
+  "notes": "US amateur SSB voice (phone) sub-bands by license class. Source: 47 CFR 97.301 + ARRL Band Plan. Update last_verified date when refreshing.",
+  "bands": [
+    {
+      "name": "160m",
+      "low_hz": 1800000,
+      "high_hz": 2000000,
+      "phone_segments": [
+        { "low_hz": 1800000, "high_hz": 2000000, "mode": "LSB", "classes": ["Extra", "Advanced", "General"] }
+      ],
+      "avoid": [
+        { "low_hz": 1800000, "high_hz": 1810000, "reason": "CW only by gentlemens agreement" }
+      ]
+    },
+    {
+      "name": "80m",
+      "low_hz": 3500000,
+      "high_hz": 4000000,
+      "phone_segments": [
+        { "low_hz": 3600000, "high_hz": 3800000, "mode": "LSB", "classes": ["Extra"] },
+        { "low_hz": 3700000, "high_hz": 3800000, "mode": "LSB", "classes": ["Advanced"] },
+        { "low_hz": 3800000, "high_hz": 4000000, "mode": "LSB", "classes": ["Extra", "Advanced", "General"] }
+      ],
+      "avoid": [
+        { "low_hz": 3500000, "high_hz": 3600000, "reason": "CW / digital" },
+        { "low_hz": 3845000, "high_hz": 3845000, "reason": "SSTV calling" },
+        { "low_hz": 3885000, "high_hz": 3885000, "reason": "AM calling" },
+        { "low_hz": 3990000, "high_hz": 4000000, "reason": "Band edge guard" }
+      ]
+    },
+    {
+      "name": "40m",
+      "low_hz": 7000000,
+      "high_hz": 7300000,
+      "phone_segments": [
+        { "low_hz": 7125000, "high_hz": 7300000, "mode": "LSB", "classes": ["Extra"] },
+        { "low_hz": 7125000, "high_hz": 7300000, "mode": "LSB", "classes": ["Advanced"] },
+        { "low_hz": 7175000, "high_hz": 7300000, "mode": "LSB", "classes": ["General"] }
+      ],
+      "avoid": [
+        { "low_hz": 7000000, "high_hz": 7125000, "reason": "CW / digital" },
+        { "low_hz": 7171000, "high_hz": 7171000, "reason": "SSTV" },
+        { "low_hz": 7290000, "high_hz": 7290000, "reason": "AM calling" },
+        { "low_hz": 7295000, "high_hz": 7300000, "reason": "Band edge guard" }
+      ]
+    },
+    {
+      "name": "20m",
+      "low_hz": 14000000,
+      "high_hz": 14350000,
+      "phone_segments": [
+        { "low_hz": 14150000, "high_hz": 14350000, "mode": "USB", "classes": ["Extra"] },
+        { "low_hz": 14175000, "high_hz": 14350000, "mode": "USB", "classes": ["Advanced"] },
+        { "low_hz": 14225000, "high_hz": 14350000, "mode": "USB", "classes": ["General"] }
+      ],
+      "avoid": [
+        { "low_hz": 14000000, "high_hz": 14150000, "reason": "CW / digital" },
+        { "low_hz": 14100000, "high_hz": 14100000, "reason": "NCDXF beacon" },
+        { "low_hz": 14230000, "high_hz": 14230000, "reason": "SSTV calling" },
+        { "low_hz": 14286000, "high_hz": 14286000, "reason": "AM calling" },
+        { "low_hz": 14340000, "high_hz": 14350000, "reason": "Band edge guard" }
+      ]
+    },
+    {
+      "name": "17m",
+      "low_hz": 18068000,
+      "high_hz": 18168000,
+      "phone_segments": [
+        { "low_hz": 18110000, "high_hz": 18168000, "mode": "USB", "classes": ["Extra", "Advanced", "General"] }
+      ],
+      "avoid": [
+        { "low_hz": 18068000, "high_hz": 18110000, "reason": "CW / digital" },
+        { "low_hz": 18160000, "high_hz": 18168000, "reason": "Band edge guard" }
+      ]
+    },
+    {
+      "name": "15m",
+      "low_hz": 21000000,
+      "high_hz": 21450000,
+      "phone_segments": [
+        { "low_hz": 21200000, "high_hz": 21450000, "mode": "USB", "classes": ["Extra"] },
+        { "low_hz": 21225000, "high_hz": 21450000, "mode": "USB", "classes": ["Advanced"] },
+        { "low_hz": 21275000, "high_hz": 21450000, "mode": "USB", "classes": ["General"] }
+      ],
+      "avoid": [
+        { "low_hz": 21000000, "high_hz": 21200000, "reason": "CW / digital" },
+        { "low_hz": 21340000, "high_hz": 21340000, "reason": "SSTV calling" },
+        { "low_hz": 21440000, "high_hz": 21450000, "reason": "Band edge guard" }
+      ]
+    },
+    {
+      "name": "12m",
+      "low_hz": 24890000,
+      "high_hz": 24990000,
+      "phone_segments": [
+        { "low_hz": 24930000, "high_hz": 24990000, "mode": "USB", "classes": ["Extra", "Advanced", "General"] }
+      ],
+      "avoid": [
+        { "low_hz": 24890000, "high_hz": 24930000, "reason": "CW / digital" },
+        { "low_hz": 24980000, "high_hz": 24990000, "reason": "Band edge guard" }
+      ]
+    },
+    {
+      "name": "10m",
+      "low_hz": 28000000,
+      "high_hz": 29700000,
+      "phone_segments": [
+        { "low_hz": 28300000, "high_hz": 29700000, "mode": "USB", "classes": ["Extra", "Advanced", "General"] },
+        { "low_hz": 28300000, "high_hz": 28500000, "mode": "USB", "classes": ["Technician"] }
+      ],
+      "avoid": [
+        { "low_hz": 28000000, "high_hz": 28300000, "reason": "CW / digital / beacons" },
+        { "low_hz": 28680000, "high_hz": 28680000, "reason": "SSTV calling" },
+        { "low_hz": 29000000, "high_hz": 29200000, "reason": "AM segment" },
+        { "low_hz": 29300000, "high_hz": 29510000, "reason": "Satellite" },
+        { "low_hz": 29600000, "high_hz": 29600000, "reason": "FM calling" },
+        { "low_hz": 29690000, "high_hz": 29700000, "reason": "Band edge guard" }
+      ]
+    }
+  ],
+  "class_hierarchy": ["Extra", "Advanced", "General", "Technician", "Novice"]
+}

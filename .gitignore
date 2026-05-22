@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env / secrets
+.env
+.env.local
+
+# Runtime artifacts (NOT redistributed)
+runtime/flexlib/*.dll
+runtime/flexlib/*.pdb
+# Piper binary distribution — operator installs from
+# https://github.com/rhasspy/piper/releases. We only keep a README pointing there.
+runtime/piper/*
+!runtime/piper/README.md
+
+# Data
+data/qsos.sqlite
+data/qsos.sqlite-*
+data/recordings/*.wav
+data/recordings/*.flac
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Frontend
+web/node_modules/
+web/dist/
+web/.vite/
+
+# User config overrides
+~/.cqk1af/

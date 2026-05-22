@@ -1,0 +1,79 @@
+operator:
+  callsign: K1AF
+  name: ""
+  qth: ""
+  grid_square: ""
+  license_class: Extra
+  phonetic_alphabet: NATO
+
+radio:
+  model: FlexRadio 6400
+  # backend: mock | tcp | flexlib. mock_mode=true overrides this for back-compat.
+  # On SmartSDR v3.x: tcp + the Windows "DAX Audio TX" device path works
+  # (audio/pipeline.py writes via sounddevice). On v4 the Windows DAX TX shim
+  # is dead — flipping to "flexlib" loads runtime/flexlib/FlexLib.dll via
+  # pythonnet and TXes over VITA UDP, but has the per-client conflict with
+  # DAX.exe and stops working after the first session. Stick with tcp on v3.
+  backend: tcp
+  mock_mode: false
+  host: auto  # override with CQK1AF_RADIO__HOST=<ip> or in ~/.cqk1af/config.yaml
+  port: 4992
+  flexlib_path: runtime/flexlib
+  target_serial: ""  # blank = first discovered radio
+
+audio:
+  rx_device: DAX Audio RX 1
+  tx_device: DAX Audio TX
+  sample_rate: 48000
+  frame_ms: 20
+  vad_aggressiveness: 3
+  vad_hangover_ms: 300
+
+stt:
+  enabled: true
+  model: distil-large-v3
+  device: auto
+  compute_type: auto
+  beam_size: 1
+
+tts:
+  enabled: true
+  voice_path: runtime/piper/en_US-amy-medium.onnx
+  rate: 1.0
+
+safety:
+  require_manual_tx_approval: true
+  approval_timeout_s: 15
+  max_transmit_seconds: 30
+  kill_releases_ptt: true
+  armed_default: false
+  id_interval_seconds: 600
+
+cq:
+  template_id: default
+  max_attempts: 5
+  listen_seconds: 7
+  inter_call_min_delay_s: 1.0
+  inter_call_max_delay_s: 2.0
+
+cloudlog:
+  enabled: false
+  url: ""
+  station_profile_id: 1
+
+mcp:
+  host: 127.0.0.1
+  port: 8765
+
+dashboard:
+  host: 127.0.0.1
+  port: 8000
+
+band_plan_path: config/band_plan_us.json
+data_dir: data
+log_level: INFO
+log_json: false
+# Live audio pipeline (DAX capture + Whisper STT, Piper TTS + DAX playback).
+# Off by default — narration-only when off. Flip to true after verifying DAX is
+# healthy and you want on-air audio.
+audio_pipeline_enabled: true
