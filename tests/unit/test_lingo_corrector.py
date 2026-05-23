@@ -32,3 +32,17 @@ def test_idempotent(raw: str, expected: str) -> None:
     once = correct_lingo(raw)
     twice = correct_lingo(once)
     assert once == twice == expected
+
+
+def test_letter_prefix_collapse_feeds_callsign_extractor() -> None:
+    # End-to-end: the rewrite must produce text the literal callsign
+    # extractor accepts. This is the whole point of the rule — Whisper
+    # mishears "N4WF" as "In 4WF", and downstream we want N4WF to
+    # appear in `pileup` candidates as if Whisper had transcribed it
+    # correctly.
+    from cqk1af.nlp.callsign_extractor import extract_callsigns
+
+    corrected = correct_lingo("calling In 4WF, In 4WF over")
+    assert "N4WF" in corrected
+    cands = [c.callsign for c in extract_callsigns(corrected)]
+    assert "N4WF" in cands
