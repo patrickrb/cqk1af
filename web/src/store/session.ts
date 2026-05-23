@@ -13,12 +13,14 @@ interface SessionStore {
   error: string;
   audio: AudioStatus | null;
   rx_voice_active: boolean;
+  valid_events: string[];
   setFromSnapshot(s: SessionState): void;
   setState(s: FSMState): void;
   setArmed(a: boolean): void;
   setRequireApproval(v: boolean): void;
   setAudioStatus(a: AudioStatus): void;
   setRxVoiceActive(active: boolean): void;
+  setValidEvents(events: string[]): void;
 }
 
 export const useSession = create<SessionStore>((set) => ({
@@ -33,6 +35,7 @@ export const useSession = create<SessionStore>((set) => ({
   error: "",
   audio: null,
   rx_voice_active: false,
+  valid_events: [],
   setFromSnapshot(s) {
     set({
       state: s.state,
@@ -45,6 +48,7 @@ export const useSession = create<SessionStore>((set) => ({
       qsos_logged: s.qsos_logged,
       error: s.error,
       audio: s.audio ?? null,
+      valid_events: s.valid_events ?? [],
     });
   },
   setState(state) { set({ state }); },
@@ -52,4 +56,5 @@ export const useSession = create<SessionStore>((set) => ({
   setRequireApproval(require_approval) { set({ require_approval }); },
   setAudioStatus(audio) { set({ audio }); },
   setRxVoiceActive(rx_voice_active) { set({ rx_voice_active }); },
+  setValidEvents(valid_events) { set({ valid_events }); },
 }));

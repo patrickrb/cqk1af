@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ...mcp_server.tools import MCPTools, ToolError
+from ...state.machine import IllegalTransition
 from ...state.states import Event, State
 from ..schemas import (
     ApproveTxRequest,
@@ -37,6 +38,11 @@ class PileupProbeRequest(BaseModel):
     callsign: str
     dry_run: bool = False
     text_override: str | None = None
+
+
+class DispatchEventRequest(BaseModel):
+    event: str
+    reason: str = "manual"
 
 
 def build_control_router(tools_provider) -> APIRouter:  # noqa: ANN001
@@ -163,6 +169,40 @@ def build_control_router(tools_provider) -> APIRouter:  # noqa: ANN001
             # No-op for other states.
             pass
         fsm.session.reset_session()
+        return await tools.get_session_state()
+
+    @r.post("/dispatch_event", response_model=SessionStateDTO)
+    async def dispatch_event(
+        req: DispatchEventRequest, tools: MCPTools = Depends(_get_tools)
+    ) -> SessionStateDTO:
+        """Manually dispatch an FSM event from the operator UI.
+
+        Only events currently valid from the present state are accepted; the
+        underlying transition table is not bypassed.
+        """
+        try:
+            event = Event(req.event)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "unknown_event", "message": f"unknown event {req.event!r}"},
+            )
+        fsm = tools.app.fsm
+        if not fsm.can(event):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "illegal_transition",
+                    "message": f"event {event} is not valid from state {fsm.state}",
+                },
+            )
+        try:
+            await fsm.dispatch(event, reason=req.reason)
+        except IllegalTransition as e:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "illegal_transition", "message": str(e)},
+            )
         return await tools.get_session_state()
 
     return r

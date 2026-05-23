@@ -130,6 +130,64 @@ def test_websocket_hello_message(client_app) -> None:
             assert msg["payload"]["radio"]["connected"] is True
 
 
+def test_state_endpoint_includes_valid_events(client_app) -> None:
+    _app, fastapi_app = client_app
+    with TestClient(fastapi_app) as client:
+        r = client.get("/api/radio/state")
+        assert r.status_code == 200
+        data = r.json()
+        # KILL/STOP/ERROR are always allowed; CONNECT is valid from DISCONNECTED.
+        assert "connect" in data["valid_events"]
+        assert "kill" in data["valid_events"]
+        # Not valid from DISCONNECTED.
+        assert "start_session" not in data["valid_events"]
+
+
+def test_dispatch_event_advances_state(client_app) -> None:
+    _app, fastapi_app = client_app
+    with TestClient(fastapi_app) as client:
+        r = client.post("/api/control/dispatch_event", json={"event": "connect"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["state"] == "IDLE"
+        assert "start_session" in body["valid_events"]
+        assert "connect" not in body["valid_events"]
+
+
+def test_dispatch_event_unknown_event_returns_400(client_app) -> None:
+    _app, fastapi_app = client_app
+    with TestClient(fastapi_app) as client:
+        r = client.post("/api/control/dispatch_event", json={"event": "bogus"})
+        assert r.status_code == 400
+        assert r.json()["detail"]["code"] == "unknown_event"
+
+
+def test_dispatch_event_illegal_from_state_returns_409(client_app) -> None:
+    _app, fastapi_app = client_app
+    with TestClient(fastapi_app) as client:
+        # From DISCONNECTED, start_session is not legal.
+        r = client.post("/api/control/dispatch_event", json={"event": "start_session"})
+        assert r.status_code == 409
+        assert r.json()["detail"]["code"] == "illegal_transition"
+
+
+def test_state_changed_broadcast_includes_valid_events(client_app) -> None:
+    _app, fastapi_app = client_app
+    with TestClient(fastapi_app) as client:
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_json()  # hello
+            client.post("/api/control/dispatch_event", json={"event": "connect"})
+            seen = False
+            for _ in range(10):
+                msg = ws.receive_json()
+                if msg.get("type") == "state_changed" and msg["payload"]["next"] == "IDLE":
+                    assert "valid_events" in msg["payload"]
+                    assert "start_session" in msg["payload"]["valid_events"]
+                    seen = True
+                    break
+            assert seen
+
+
 def test_websocket_kill_via_message(client_app) -> None:
     _app, fastapi_app = client_app
     with TestClient(fastapi_app) as client:

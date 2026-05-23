@@ -76,6 +76,7 @@ export interface SessionState {
   qsos_logged: number;
   error: string;
   audio?: AudioStatus | null;
+  valid_events?: string[];
 }
 
 export interface RadioStatus {
@@ -110,7 +111,7 @@ export type WSMessage =
         }>;
       };
     }
-  | { type: "state_changed"; payload: { prev: FSMState; next: FSMState; reason: string; ts: string } }
+  | { type: "state_changed"; payload: { prev: FSMState; next: FSMState; reason: string; ts: string; valid_events?: string[] } }
   | { type: "radio_slice"; payload: Partial<SliceInfo> & { connected?: boolean; model?: string; ptt_on?: boolean } }
   | { type: "s_meter"; payload: { slice_id: number; dbm: number } }
   | { type: "transcript"; payload: { text: string; confidence: number; direction?: "tx" | "rx"; ts: string } }

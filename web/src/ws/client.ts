@@ -90,6 +90,9 @@ function dispatch(msg: WSMessage) {
       break;
     case "state_changed":
       useSession.getState().setState(msg.payload.next);
+      if (msg.payload.valid_events) {
+        useSession.getState().setValidEvents(msg.payload.valid_events);
+      }
       // Clear pileup when QSO concludes
       if (msg.payload.next === "LOGGED" || msg.payload.next === "STOPPED" || msg.payload.next === "IDLE") {
         useTranscripts.getState().clearPileup();

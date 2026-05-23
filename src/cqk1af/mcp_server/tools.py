@@ -127,6 +127,7 @@ class SessionStateDTO(BaseModel):
     qsos_logged: int
     error: str
     audio: AudioStatusDTO | None = None
+    valid_events: list[str] = Field(default_factory=list)
 
 
 class CandidateFreqDTO(BaseModel):
@@ -202,6 +203,7 @@ class MCPTools:
             qsos_logged=s.qsos_logged,
             error=s.error,
             audio=audio_status,
+            valid_events=[str(e) for e in Event if self.app.fsm.can(e)],
         )
 
     # --- RADIO ---------------------------------------------------------
