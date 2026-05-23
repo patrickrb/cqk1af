@@ -36,6 +36,7 @@ from ..events import (
     VoiceActivityStopped,
 )
 from ..mcp_server.tools import MCPTools
+from ..state.states import Event as FSMEvent
 from ..util.logging import get_logger
 
 log = get_logger(__name__)
@@ -195,6 +196,7 @@ class WSHub:
 
     async def _on_state_changed(self, ev: Event) -> None:
         assert isinstance(ev, StateChanged)
+        valid_events = [str(e) for e in FSMEvent if self.app.fsm.can(e)]
         await self._broadcast(
             {
                 "type": "state_changed",
@@ -203,6 +205,7 @@ class WSHub:
                     "next": ev.next,
                     "reason": ev.reason,
                     "ts": ev.ts.isoformat(),
+                    "valid_events": valid_events,
                 },
             }
         )

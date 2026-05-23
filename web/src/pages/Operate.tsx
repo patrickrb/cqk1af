@@ -4,6 +4,7 @@ import { PileupQueue } from "@/components/PileupQueue";
 import { TranscriptFeed } from "@/components/TranscriptFeed";
 import { StatsPanel } from "@/components/StatsPanel";
 import { SessionControls } from "@/components/SessionControls";
+import { ManualDispatch } from "@/components/ManualDispatch";
 import { OperatingPanel } from "@/components/OperatingPanel";
 import { PendingLogEntry } from "@/components/PendingLogEntry";
 
@@ -18,6 +19,7 @@ export function Operate() {
         <SessionControls />
         <RadioPanel />
         <StatsPanel />
+        <ManualDispatch />
       </div>
       <div className="col-span-12 md:col-span-4 space-y-4">
         <OperatingPanel />
