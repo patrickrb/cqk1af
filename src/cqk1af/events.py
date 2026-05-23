@@ -175,6 +175,18 @@ class SessionArmed(Event):
 # --- QSO -----------------------------------------------------------------
 
 
+class PileupChanged(Event):
+    """Full pileup-list sync after a manual edit/add/remove.
+
+    Distinct from ``CallsignHeard`` which is a single-entry append fired by STT
+    or simulation. ``PileupChanged`` carries the complete current list so the
+    dashboard can replace its view atomically.
+    """
+
+    topic: ClassVar[str] = "pileup.changed"
+    entries: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class QSOStarted(Event):
     topic: ClassVar[str] = "qso.started"
     qso_id: uuid.UUID

@@ -19,6 +19,7 @@ from ..events import (
     CallsignHeard,
     Event,
     KillSwitchTriggered,
+    PileupChanged,
     PttChanged,
     QSOLogged,
     QSOStarted,
@@ -70,6 +71,7 @@ class WSHub:
         self._subs.append(await b.subscribe("radio.ptt", self._on_ptt, name="ws.ptt"))
         self._subs.append(await b.subscribe("transcript.final", self._on_transcript_final, name="ws.tr"))
         self._subs.append(await b.subscribe("transcript.callsign", self._on_callsign, name="ws.call"))
+        self._subs.append(await b.subscribe("pileup.changed", self._on_pileup_changed, name="ws.pileup"))
         self._subs.append(await b.subscribe("audio.status", self._on_audio_status, name="ws.audio"))
         self._subs.append(
             await b.subscribe("audio.voice_started", self._on_voice_started, name="ws.voice_started")
@@ -276,6 +278,15 @@ class WSHub:
                         }
                     ]
                 },
+            }
+        )
+
+    async def _on_pileup_changed(self, ev: Event) -> None:
+        assert isinstance(ev, PileupChanged)
+        await self._broadcast(
+            {
+                "type": "pileup_sync",
+                "payload": {"entries": ev.entries},
             }
         )
 

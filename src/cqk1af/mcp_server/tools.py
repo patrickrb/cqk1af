@@ -21,11 +21,13 @@ from pydantic import BaseModel, Field
 
 from ..app import App
 from ..events import (
+    PileupChanged,
     QSOLogged,
     QSOStarted,
     QSOUpdated,
     TranscriptFinal,
 )
+from ..nlp.pileup_probe import build_probe, has_wildcards, with_operator_id
 from ..radio.band_plan import Allowed
 from ..state.context import HeardCallsign, QSOContext
 from ..tts.phonetic import (
@@ -483,6 +485,14 @@ class MCPTools:
         picked = next((h for h in sess.pileup if h.callsign.upper() == callsign.upper()), None)
         if picked is None:
             raise ToolError("unknown_caller", f"{callsign} not in pileup")
+        # Partial copies stay in HANDLING_PILEUP — the operator must use the
+        # /api/control/pileup/probe path (or edit the call first) to advance.
+        # Refusing here avoids accidentally starting a QSO with a "?" call.
+        if has_wildcards(picked.callsign):
+            raise ToolError(
+                "partial_callsign",
+                f"{picked.callsign} still has wildcards — probe the caller or finish editing first",
+            )
         qso = QSOContext(
             qso_id=uuid.uuid4(),
             callsign=picked.callsign,
@@ -496,6 +506,134 @@ class MCPTools:
         )
         await self.app.fsm.dispatch(Event.PILEUP_SELECTED, reason=f"picked={picked.callsign}")
         return await self.get_session_state()
+
+    # --- PILEUP MANAGEMENT ---------------------------------------------
+
+    @staticmethod
+    def _norm_partial_callsign(callsign: str) -> str:
+        """Normalize an operator-entered partial: uppercase, strip, A-Z/0-9/?.
+
+        We deliberately do NOT validate the shape against the strict callsign
+        regex — partial calls violate the shape by definition (`K1??`).
+        """
+        s = (callsign or "").upper().strip()
+        if not s:
+            raise ToolError("empty_callsign", "callsign is required")
+        allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789?/")
+        bad = [c for c in s if c not in allowed]
+        if bad:
+            raise ToolError(
+                "invalid_callsign",
+                f"unsupported character(s) in callsign: {''.join(sorted(set(bad)))}",
+            )
+        if len(s) > 10:
+            raise ToolError("callsign_too_long", "callsign limited to 10 characters")
+        return s
+
+    async def _broadcast_pileup(self) -> None:
+        sess = self.app.fsm.session
+        entries = [
+            {
+                "callsign": h.callsign,
+                "confidence": h.confidence,
+                "snr_dbm": h.snr_dbm,
+            }
+            for h in sess.pileup
+        ]
+        await self.app.bus.publish(PileupChanged(entries=entries))
+
+    async def add_pileup_entry(
+        self,
+        callsign: str,
+        confidence: float = 1.0,
+        snr_dbm: float | None = None,
+    ) -> SessionStateDTO:
+        """Manually add an entry to the pileup queue.
+
+        Used when the operator heard a station the STT pipeline missed, or
+        when entering a partial call with ``?`` wildcards to probe.
+        """
+        sess = self.app.fsm.session
+        norm = self._norm_partial_callsign(callsign)
+        if any(h.callsign.upper() == norm for h in sess.pileup):
+            raise ToolError("duplicate_callsign", f"{norm} already in pileup")
+        sess.pileup.append(
+            HeardCallsign(
+                callsign=norm,
+                confidence=max(0.0, min(1.0, float(confidence))),
+                snr_dbm=snr_dbm,
+                raw_text="(operator added)",
+            )
+        )
+        await self._broadcast_pileup()
+        return await self.get_session_state()
+
+    async def edit_pileup_entry(self, old_callsign: str, new_callsign: str) -> SessionStateDTO:
+        """Rename an existing pileup entry (e.g. fill in `?`s after the caller responds)."""
+        sess = self.app.fsm.session
+        old = (old_callsign or "").upper().strip()
+        new = self._norm_partial_callsign(new_callsign)
+        target = next((h for h in sess.pileup if h.callsign.upper() == old), None)
+        if target is None:
+            raise ToolError("unknown_caller", f"{old} not in pileup")
+        if new != target.callsign and any(
+            h.callsign.upper() == new for h in sess.pileup if h is not target
+        ):
+            raise ToolError(
+                "duplicate_callsign", f"another pileup entry is already {new}"
+            )
+        target.callsign = new
+        await self._broadcast_pileup()
+        return await self.get_session_state()
+
+    async def remove_pileup_entry(self, callsign: str) -> SessionStateDTO:
+        sess = self.app.fsm.session
+        target = (callsign or "").upper().strip()
+        before = len(sess.pileup)
+        sess.pileup[:] = [h for h in sess.pileup if h.callsign.upper() != target]
+        if len(sess.pileup) == before:
+            raise ToolError("unknown_caller", f"{target} not in pileup")
+        await self._broadcast_pileup()
+        return await self.get_session_state()
+
+    async def probe_pileup_entry(
+        self, callsign: str, *, dry_run: bool = False, text_override: str | None = None
+    ) -> dict[str, Any]:
+        """Generate (and optionally transmit) a phrasing that asks the partial
+        caller to fill in the missing characters of their callsign.
+
+        ``dry_run=True`` returns the generated text without keying TX — used by
+        the dashboard to preview the probe before the operator confirms.
+        When ``text_override`` is provided, that exact text is transmitted
+        instead (still through the full band-plan + interlock + Piper path).
+        """
+        sess = self.app.fsm.session
+        target = (callsign or "").upper().strip()
+        entry = next((h for h in sess.pileup if h.callsign.upper() == target), None)
+        if entry is None:
+            raise ToolError("unknown_caller", f"{target} not in pileup")
+        probe = build_probe(entry.callsign)
+        text_to_send = (text_override or "").strip() or with_operator_id(
+            probe.text, self.app.settings.operator.callsign
+        )
+        if dry_run:
+            return {
+                "callsign": entry.callsign,
+                "pattern": probe.pattern,
+                "probe_text": probe.text,
+                "tx_text": text_to_send,
+                "transmitted": False,
+            }
+        # Reuse the manual_tx path so band-plan + interlock + Piper all fire.
+        result = await self.manual_tx(text=text_to_send)
+        return {
+            "callsign": entry.callsign,
+            "pattern": probe.pattern,
+            "probe_text": probe.text,
+            "tx_text": text_to_send,
+            "transmitted": True,
+            "spoken": result.get("spoken", ""),
+        }
 
     async def exchange_signal_report(
         self, rst_sent: str, expect_rst: bool = True

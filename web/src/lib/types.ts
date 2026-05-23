@@ -117,6 +117,7 @@ export type WSMessage =
   | { type: "audio_status"; payload: AudioStatus }
   | { type: "rx_voice"; payload: { active: boolean; channel: string; duration_ms?: number } }
   | { type: "callsigns_heard"; payload: { entries: HeardCallsign[] } }
+  | { type: "pileup_sync"; payload: { entries: HeardCallsign[] } }
   | { type: "tx_approval_requested"; payload: { req_id: string; summary: string; payload: Record<string, unknown>; expires_at: string; timeout_s?: number } }
   | { type: "qso_started"; payload: { qso_id: string; callsign: string; freq_hz: number; mode: string } }
   | { type: "qso_updated"; payload: { qso_id: string; fields: Record<string, unknown> } }

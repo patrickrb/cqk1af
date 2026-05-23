@@ -1,7 +1,10 @@
 """Control endpoints (arm, kill, approve TX, select caller, etc.)."""
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from ...mcp_server.tools import MCPTools, ToolError
 from ...state.states import Event, State
@@ -13,6 +16,27 @@ from ..schemas import (
     SelectCallerRequest,
     SessionStateDTO,
 )
+
+
+class PileupAddRequest(BaseModel):
+    callsign: str
+    confidence: float = 1.0
+    snr_dbm: float | None = None
+
+
+class PileupEditRequest(BaseModel):
+    old_callsign: str
+    new_callsign: str
+
+
+class PileupRemoveRequest(BaseModel):
+    callsign: str
+
+
+class PileupProbeRequest(BaseModel):
+    callsign: str
+    dry_run: bool = False
+    text_override: str | None = None
 
 
 def build_control_router(tools_provider) -> APIRouter:  # noqa: ANN001
@@ -78,6 +102,50 @@ def build_control_router(tools_provider) -> APIRouter:  # noqa: ANN001
         # still be armed and the kill switch still works.
         tools.app.settings.safety.require_manual_tx_approval = bool(req.armed)
         return {"require_manual_tx_approval": tools.app.settings.safety.require_manual_tx_approval}
+
+    @r.post("/pileup/add", response_model=SessionStateDTO)
+    async def pileup_add(
+        req: PileupAddRequest, tools: MCPTools = Depends(_get_tools)
+    ) -> SessionStateDTO:
+        try:
+            return await tools.add_pileup_entry(
+                callsign=req.callsign, confidence=req.confidence, snr_dbm=req.snr_dbm
+            )
+        except ToolError as e:
+            raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message})
+
+    @r.post("/pileup/edit", response_model=SessionStateDTO)
+    async def pileup_edit(
+        req: PileupEditRequest, tools: MCPTools = Depends(_get_tools)
+    ) -> SessionStateDTO:
+        try:
+            return await tools.edit_pileup_entry(
+                old_callsign=req.old_callsign, new_callsign=req.new_callsign
+            )
+        except ToolError as e:
+            raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message})
+
+    @r.post("/pileup/remove", response_model=SessionStateDTO)
+    async def pileup_remove(
+        req: PileupRemoveRequest, tools: MCPTools = Depends(_get_tools)
+    ) -> SessionStateDTO:
+        try:
+            return await tools.remove_pileup_entry(callsign=req.callsign)
+        except ToolError as e:
+            raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message})
+
+    @r.post("/pileup/probe")
+    async def pileup_probe(
+        req: PileupProbeRequest, tools: MCPTools = Depends(_get_tools)
+    ) -> dict[str, Any]:
+        try:
+            return await tools.probe_pileup_entry(
+                callsign=req.callsign,
+                dry_run=req.dry_run,
+                text_override=req.text_override,
+            )
+        except ToolError as e:
+            raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message})
 
     @r.post("/reset", response_model=SessionStateDTO)
     async def reset(tools: MCPTools = Depends(_get_tools)) -> SessionStateDTO:

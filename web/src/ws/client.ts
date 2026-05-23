@@ -133,6 +133,10 @@ function dispatch(msg: WSMessage) {
     case "callsigns_heard":
       useTranscripts.getState().appendPileup(msg.payload.entries);
       break;
+    case "pileup_sync":
+      // Full-list replace (after a manual add/edit/remove on the server).
+      useTranscripts.getState().setPileup(msg.payload.entries);
+      break;
     case "tx_approval_requested":
       useApprovals.getState().add(msg.payload);
       break;
