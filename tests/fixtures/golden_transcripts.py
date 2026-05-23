@@ -27,4 +27,17 @@ GOLDEN_PAIRS: list[tuple[str, str]] = [
         "kilo one alpha foxtrot seventy three",
         "kilo one alpha foxtrot 73",
     ),
+    # Letter-homophone-prefix collapses (Whisper splits the leading letter
+    # off the rest of a literal callsign).
+    ("this is In 4WF calling CQ", "this is N4WF calling CQ"),
+    ("In 4WF", "N4WF"),
+    ("In 4WF/M portable", "N4WF/M portable"),
+    ("and 4WF over", "N4WF over"),
+    ("Kay 1AF here", "K1AF here"),
+    ("eye 5MN from Italy", "I5MN from Italy"),
+    # Tail must look like a callsign tail (digit+upper letters) — prose with
+    # lowercase or numeric-only tails must survive intact.
+    ("an 8-hour shift", "an 8-hour shift"),
+    ("in 4wd vehicles", "in 4wd vehicles"),
+    ("in the year 2026", "in the year 2026"),
 ]
